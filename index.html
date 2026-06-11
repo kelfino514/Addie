@@ -1593,13 +1593,19 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
     if(!words.length)return '';
     return words.length>16?words.slice(0,16).join(' ')+'…':words.join(' ');
   };
+  // Trim a to-do down to a terser note: drop leading filler ("I need to…"), cap length.
+  const condense=s=>{
+    let t=s.replace(/^(please\s+|just\s+|make sure (?:to|i)\s+|don'?t forget to\s+|remember to\s+|need to\s+|i\s+(?:need to|have to|should|will|'?ll|am going to|plan to|want to|gotta)\s+|we\s+(?:need to|should|will)\s+|going to\s+)/i,'').replace(/\s+/g,' ').trim();
+    t=t.replace(/^[a-z]/,c=>c.toUpperCase());
+    return t;
+  };
   // Local heuristic fallback — used when the serverless Brain function isn't reachable.
   const localExtract=raw=>{
     const items=splitItems(raw); if(!items.length)return [];
     const out=[];
     const s=summarize(raw);
     if(s)out.push({id:uid(),type:'summary',text:s,source:'Summary · on-device',suggestKind:'note'});
-    items.forEach(l=>out.push({id:uid(),type:'action',text:l,source:'Quick capture · on-device',suggestKind:'task'}));
+    items.forEach(l=>out.push({id:uid(),type:'action',text:condense(l),source:'Quick capture · on-device',suggestKind:'task'}));
     return out;
   };
   // Map the /api/brainy response into insight cards.
