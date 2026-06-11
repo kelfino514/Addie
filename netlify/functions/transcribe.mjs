@@ -9,16 +9,20 @@ export default async (req) => {
   const key = process.env.OPENAI_API_KEY;
   if (!key) return Response.json({ error: 'Server is missing OPENAI_API_KEY.' }, { status: 500 });
 
-  let audio, mime;
-  try { ({ audio, mime } = await req.json()); } catch { return Response.json({ error: 'Invalid JSON body.' }, { status: 400 }); }
+  let audio, mime, name;
+  try { ({ audio, mime, name } = await req.json()); } catch { return Response.json({ error: 'Invalid JSON body.' }, { status: 400 }); }
   if (!audio) return Response.json({ error: 'No audio provided.' }, { status: 400 });
 
   let bytes;
   try { bytes = Uint8Array.from(atob(audio), (c) => c.charCodeAt(0)); }
   catch { return Response.json({ error: 'Audio was not valid base64.' }, { status: 400 }); }
 
+  // Whisper detects format from the filename extension, so send a real one.
+  const extFromMime = { 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/mp4': 'm4a', 'audio/x-m4a': 'm4a', 'audio/m4a': 'm4a', 'audio/aac': 'm4a', 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/flac': 'flac' };
+  let filename = (typeof name === 'string' && /\.[a-z0-9]{2,4}$/i.test(name)) ? name.replace(/[^\w.\-]/g, '_') : `audio.${extFromMime[mime] || 'm4a'}`;
+
   const form = new FormData();
-  form.append('file', new Blob([bytes], { type: mime || 'audio/webm' }), 'audio.webm');
+  form.append('file', new Blob([bytes], { type: mime || 'audio/mp4' }), filename);
   form.append('model', 'whisper-1');
 
   let r;
