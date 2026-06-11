@@ -439,7 +439,10 @@ const StickyNote = ({note,onUpdate,onDelete,projectColor,noteWidth=220}) => {
     setTimeout(()=>{ta.focus();ta.setSelectionRange(newCursor,newCursor);autoH(ta);},0);
   };
 
-  const autoH=el=>{if(el){el.style.height='auto';el.style.height=el.scrollHeight+'px';}};
+  // Auto-grow the body up to a max, then scroll inside the note.
+  const autoH=el=>{if(!el)return;el.style.height='auto';const h=el.scrollHeight,max=280;el.style.height=Math.min(h,max)+'px';el.style.overflowY=h>max?'auto':'hidden';};
+  // Re-fit whenever the text changes externally (e.g. a Brain item appended) or on expand/resize.
+  useEffect(()=>{if(!collapsed)autoH(taRef.current);},[note.text,collapsed,noteWidth]);
 
   const handleText=e=>{
     let val=e.target.value;
@@ -489,7 +492,7 @@ const StickyNote = ({note,onUpdate,onDelete,projectColor,noteWidth=220}) => {
             style=${{width:'100%',background:'transparent',border:'none',outline:'none',fontFamily:"'DM Serif Display',serif",fontSize:14,color:'#2A2825',marginBottom:5,borderBottom:'1px solid rgba(0,0,0,0.08)',paddingBottom:4,display:'block'}}/>
           <textarea value=${note.text||''} onInput=${handleText} onClick=${e=>e.stopPropagation()} placeholder="Note…"
             style=${{width:'100%',background:'transparent',border:'none',outline:'none',resize:'none',fontFamily:"'Georgia','Times New Roman',serif",fontSize:12,color:'#3A3530',lineHeight:1.5,display:'block',minHeight:40,overflow:'hidden'}}
-            ref=${el=>{if(el&&el!==taRef.current){taRef.current=el;autoH(el);}}}/>
+            ref=${el=>{taRef.current=el;}}/>
           ${(note.checklistItems||[]).length>0&&html`<div style=${{marginTop:5,borderTop:'1px solid rgba(0,0,0,0.06)',paddingTop:5}}>
             ${note.checklistItems.slice(0,4).map(it=>html`<div key=${it.id} style=${{display:'flex',alignItems:'center',gap:5,marginBottom:3}}>
               <div onClick=${e=>{e.stopPropagation();onUpdate({...note,checklistItems:note.checklistItems.map(x=>x.id===it.id?{...x,done:!x.done}:x)});}} style=${{width:11,height:11,borderRadius:2,border:`1.5px solid ${ck}`,background:it.done?ck:'transparent',cursor:'pointer',flexShrink:0,transition:'all 0.12s'}}/>
@@ -1832,7 +1835,8 @@ const App = () => {
         if(n.id!==noteId)return n;
         const add=extractDue(insight.text).text;
         const sep=(n.text&&n.text.trim())?'\n':'';
-        return{...n,text:(n.text||'')+sep+add};
+        // Append as a new bullet, and expand the note so the new line is visible + sized.
+        return{...n,text:(n.text||'')+sep+'• '+add,collapsed:false};
       })};
     })}));
     if(!expandedIds.has(projectId))setExpandedIds(prev=>new Set([...prev,projectId]));
