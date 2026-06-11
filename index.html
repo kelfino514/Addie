@@ -1452,6 +1452,7 @@ const InsightCard = ({insight,projects,selectedProjectId,onSelectProject,importa
   const st=INSIGHT_STYLES[insight.type]||INSIGHT_STYLES.action;
   const kinds=[['task','+ Task'],['reminder','+ Reminder'],['event','+ Event'],['note','+ Note']];
   const[noteMenuOpen,setNoteMenuOpen]=useState(false);
+  const[noteName,setNoteName]=useState(''); // optional title for a new note
   const autoH=el=>{if(el){el.style.height='auto';el.style.height=el.scrollHeight+'px';}};
   const val=(text!==undefined&&text!==null)?text:insight.text;
   const effText=()=>(val||'').trim();
@@ -1460,6 +1461,7 @@ const InsightCard = ({insight,projects,selectedProjectId,onSelectProject,importa
   const projNotes=proj?(proj.notes||[]):[];
   const noteLabel=n=>(n.title&&n.title.trim())||((n.text||'').trim().split('\n')[0].slice(0,38))||'Untitled note';
   const addToNote=id=>{const t=effText();if(t&&onAddToNote)onAddToNote({...insight,text:t},selectedProjectId,id);setNoteMenuOpen(false);};
+  const addNewNote=()=>{const t=effText();if(!t)return;onAdd({...insight,text:t,noteTitle:noteName.trim()},selectedProjectId,'note',important);setNoteName('');setNoteMenuOpen(false);};
   const menuItem={width:'100%',textAlign:'left',display:'flex',alignItems:'center',background:'white',border:'1px solid #ECE6DE',borderRadius:6,padding:'6px 8px',fontSize:11.5,color:'#2A2825',cursor:'pointer',marginBottom:4};
   return html`
     <div style=${{background:'white',border:'1px solid #ECE6DE',borderRadius:12,padding:'11px 12px',marginBottom:10,boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
@@ -1500,10 +1502,15 @@ const InsightCard = ({insight,projects,selectedProjectId,onSelectProject,importa
       </div>
       ${noteMenuOpen&&html`
         <div style=${{marginTop:6,border:'1px solid #ECE6DE',borderRadius:8,background:'#FAFAF8',padding:'7px 8px'}}>
-          <button onClick=${()=>{add('note');setNoteMenuOpen(false);}} style=${menuItem}>
-            <span style=${{fontWeight:700,marginRight:7}}>＋</span>New note
-            ${important&&html`<span style=${{marginLeft:'auto',fontSize:9,fontWeight:700,color:'#9A7A00',background:'#FFF3BF',borderRadius:4,padding:'1px 5px'}}>YELLOW</span>`}
-          </button>
+          <div style=${{display:'flex',alignItems:'center',gap:5,marginBottom:4}}>
+            <span style=${{fontSize:13,fontWeight:700,color:'#7A7068',flexShrink:0}}>＋</span>
+            <input value=${noteName} onInput=${e=>setNoteName(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addNewNote();}}
+              placeholder="Name the note (optional)" autofocus
+              style=${{flex:1,minWidth:0,border:'1px solid #E0D8D0',borderRadius:6,padding:'5px 7px',fontSize:11.5,color:'#2A2825',background:'white',outline:'none'}}/>
+            <button onClick=${addNewNote} title="Create a new note"
+              style=${{flexShrink:0,border:'none',background:'#2A2825',color:'#F4F1ED',borderRadius:6,padding:'5px 9px',fontSize:11,fontWeight:500,cursor:'pointer'}}>Create</button>
+          </div>
+          ${important&&html`<div style=${{fontSize:9,fontWeight:700,color:'#9A7A00',marginBottom:5,paddingLeft:2}}>★ new note will be yellow</div>`}
           ${projNotes.length>0&&html`<div style=${{fontSize:9.5,letterSpacing:'0.5px',textTransform:'uppercase',color:'#B0A898',fontWeight:600,padding:'3px 2px 5px'}}>or append to</div>`}
           ${projNotes.map(n=>html`<button key=${n.id} onClick=${()=>addToNote(n.id)} style=${menuItem}>
             <span style=${{display:'inline-block',width:9,height:9,borderRadius:2,background:n.color,border:'1px solid rgba(0,0,0,0.12)',marginRight:7,flexShrink:0}}/>
@@ -1821,7 +1828,7 @@ const App = () => {
     setState(s=>{
       const projects=s.projects.map(p=>{
         if(p.id!==projectId)return p;
-        if(kind==='note')return{...p,notes:[...p.notes,{id:newId,title:'',text:cleanText,color:important?'#FFF3BF':defaultNoteColor(p.color),gradientStep:null,checklistItems:[],collapsed:false,fromBrainy:true}]};
+        if(kind==='note')return{...p,notes:[...p.notes,{id:newId,title:(insight.noteTitle||'').trim(),text:cleanText,color:important?'#FFF3BF':defaultNoteColor(p.color),gradientStep:null,checklistItems:[],collapsed:false,fromBrainy:true}]};
         const base={id:newId,text:cleanText,done:false,fromBrainy:true};
         if(kind==='reminder')return{...p,reminders:[...(p.reminders||[]),{...base,flagged:important,dueDate:due,taskTime:null,endTime:null}]};
         if(kind==='event')return{...p,events:[...(p.events||[]),{...base,important,dueDate:due,taskTime:null,endTime:null}]};
