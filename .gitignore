@@ -1,0 +1,14 @@
+# Secrets — never commit. Keys live in Netlify env vars (see .env.example).
+.env
+.env.*
+!.env.example
+
+# Dependencies / build
+node_modules/
+
+# Local-only tooling (Claude Code preview helper + settings)
+.claude/
+
+# OS cruft
+.DS_Store
+Thumbs.db

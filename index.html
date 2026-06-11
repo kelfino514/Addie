@@ -1,0 +1,1864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+<meta name="apple-mobile-web-app-title" content="Planner + Brainy"/>
+<meta name="theme-color" content="#F4F1ED"/>
+<title>Planner + Brainy</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Serif+Display:ital@0;1&family=Caveat:wght@400;600&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body,#root{height:100%;overflow:hidden}
+body{font-family:'DM Sans','Helvetica Neue',sans-serif;background:#F4F1ED;color:#2A2825;overscroll-behavior:none;-webkit-tap-highlight-color:transparent}
+button,input,textarea{font-family:inherit}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#D0C8C0;border-radius:2px}
+input::placeholder,textarea::placeholder{color:#8A8078}
+@keyframes brainPulse{0%,100%{opacity:1}50%{opacity:0.2}}
+.brain-rec-dot{animation:brainPulse 1s infinite}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module">
+import { h, render, Fragment } from 'https://esm.sh/preact@10.19.3';
+import { useState, useRef, useEffect, useCallback } from 'https://esm.sh/preact@10.19.3/hooks';
+import htm from 'https://esm.sh/htm@3.1.1';
+const html = htm.bind(h);
+
+/* ── Utilities ─────────────────────────────────────────────── */
+const uid = () => Math.random().toString(36).slice(2,10);
+const debounce = (fn,ms) => { let t; return (...a) => { clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; };
+
+/* ── Color helpers ─────────────────────────────────────────── */
+function hexToHsl(hex){
+  let r=parseInt(hex.slice(1,3),16)/255,g=parseInt(hex.slice(3,5),16)/255,b=parseInt(hex.slice(5,7),16)/255;
+  const max=Math.max(r,g,b),min=Math.min(r,g,b);
+  let hh,s,l=(max+min)/2;
+  if(max===min){hh=s=0;}else{
+    const d=max-min;s=l>0.5?d/(2-max-min):d/(max+min);
+    switch(max){case r:hh=((g-b)/d+(g<b?6:0))/6;break;case g:hh=((b-r)/d+2)/6;break;default:hh=((r-g)/d+4)/6;}
+  }
+  return[hh*360,s*100,l*100];
+}
+function hslToHex(h,s,l){
+  h/=360;s/=100;l/=100;let r,g,b;
+  if(s===0){r=g=b=l;}else{
+    const q=l<0.5?l*(1+s):l+s-l*s,p=2*l-q;
+    const f=(p,q,t)=>{if(t<0)t+=1;if(t>1)t-=1;if(t<1/6)return p+(q-p)*6*t;if(t<1/2)return q;if(t<2/3)return p+(q-p)*(2/3-t)*6;return p;};
+    r=f(p,q,h+1/3);g=f(p,q,h);b=f(p,q,h-1/3);
+  }
+  return'#'+[r,g,b].map(x=>Math.round(x*255).toString(16).padStart(2,'0')).join('');
+}
+const generateGradientScale = (hex,steps=6) => {
+  try{const[h,s]=hexToHsl(hex);return Array.from({length:steps},(_,i)=>hslToHex(h,s*(0.4+(i/(steps-1))*0.6),90-(i/(steps-1))*50));}
+  catch{return Array(steps).fill(hex);}
+};
+const darken = hex => { try{const[h,s,l]=hexToHsl(hex);return hslToHex(h,s,Math.max(15,l-35));}catch{return'#555';} };
+const isLight = hex => { try{const[,,l]=hexToHsl(hex);return l>60;}catch{return true;} };
+/* Sticky notes inherit the project color, but on dark/black-scheme projects
+   that makes dark text unreadable — fall back to a light gray for those. */
+const defaultNoteColor = c => isLight(c) ? c : '#E4E1DC';
+
+const PRIORITY_COLOR='#D4758A', PRIORITY_BG='#FFF8E1';
+const REMINDER_COLOR='#5B8FBF', REMINDER_BG='#EEF4FB';
+const PROJECT_COLORS=['#2A2825','#5C5650','#8C8480','#FFFFFF','#F4F1ED','#C8B8A2','#A8BBA8','#B8C4CC','#C4B8C8','#CCBFB0','#A8C4BC','#F7D9D9','#FAE5CC','#FDF3CC','#E8F5D9','#D9EBF7','#D9D9F7','#F0D9F7','#D9F0F7'];
+const STANDARD_COLORS=['#FFF3BF','#D4EAD4','#D6E8F5','#F5D6E8','#EDE0D4','#E8D6F5','#FFE4CC','#D4E8E8'];
+/* Uniform fixed-width slot for trailing row icons (calendar / star / flag / delete)
+   so they line up into clean columns against the right margin across every row. */
+const ICON_BTN={background:'none',border:'none',cursor:'pointer',lineHeight:1,flexShrink:0,width:20,height:20,padding:0,display:'flex',alignItems:'center',justifyContent:'center',transition:'color 0.15s'};
+const ICON_SLOT={width:20,height:20,flexShrink:0}; // empty placeholder to keep columns aligned
+
+/* ── Storage ───────────────────────────────────────────────────
+   Single seam for persistence. Today: localStorage.
+   Phase 3: swap saveState/loadState for a Supabase adapter
+   (same signatures) to get cross-device sync — no UI changes. */
+const SKEY='unified-v1';
+const saveState = s => { try{localStorage.setItem(SKEY,JSON.stringify(s));}catch(e){} };
+const loadState = () => { try{const r=localStorage.getItem(SKEY);if(r)return JSON.parse(r);}catch(e){}return null; };
+const exportBackup = s => {
+  const b=new Blob([JSON.stringify(s,null,2)],{type:'application/json'});
+  const u=URL.createObjectURL(b),a=document.createElement('a');
+  a.href=u;a.download=`planner-backup-${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(u);
+};
+const importBackup = (file,cb) => {
+  const r=new FileReader();r.onload=e=>{try{cb(JSON.parse(e.target.result));}catch{alert('Invalid backup file.');}};r.readAsText(file);
+};
+
+/* ── Seed ──────────────────────────────────────────────────── */
+const makeSeed = () => {
+  const C=PROJECT_COLORS;
+  const mk=(name,color,tasks=[],reminders=[],events=[],notes=[])=>({
+    id:uid(),name,color,
+    tasks:tasks.map(t=>({id:uid(),text:t,done:false})),
+    reminders:reminders.map(r=>({id:uid(),text:r,done:false,flagged:true})),
+    events:events.map(e=>({id:uid(),text:e,done:false,important:false,dueDate:null,taskTime:null,endTime:null})),
+    notes:notes.map(n=>({id:uid(),title:n.t,text:n.b||'',color:defaultNoteColor(color),gradientStep:null,checklistItems:[],collapsed:false})),
+  });
+  return{
+    projects:[
+      mk('Peds Team',C[0],
+        ['Plan skills day lectures','Super User education plan/presentation'],
+        ['Hemodynamics cheat sheet','Showpad checklist'],
+        [],
+        [{t:'Dr. Dwight Bailey',b:"• PICU attending @ Levine Children's\n• lecture Peds team on Hemo + see if we like it"},
+         {t:'check Tableau access - Patrick'}]),
+      mk('Dell – Austin, TX',C[6],
+        ['Lindsay schematic','Gottlieb illustration','OR Breakfast 6/4'],
+        ['PICU hemo education'],
+        ['patient day Sept 22','Stromberg vendor day Dec 10–12'],
+        [{t:'Super user class',b:"1 hour - screen setup, troubleshooting, guide through scenarios\nPlan for right after skills day"}]),
+      mk('Shriners – Sacramento, CA',C[16],['touch base 6/1 to confirm plans'],[],[],[]),
+      mk("Valley Children's – Fresno, CA",C[10],['Check in w/ NIRS champ (Dr. HarryKallas)'],[],[],[]),
+      mk("Phoenix Children's – Phoenix, AZ",C[12],['Site visit'],[],[],[]),
+      mk('Rady – San Diego, CA',C[11],[],[],[],
+        [{t:'FYI',b:"• if they change DPT, then they change tiers\n• Also offered two year rebate\n• INVOS contract ends?"},
+         {t:'Ideas',b:"• Loop in Dr. Dwight Bailey to give Hemo lecture?\n• offer help w/ pt selection w/ MDs & walk through clinical decision making"}]),
+    ],
+    priorityIds:[],completedExpanded:false,
+  };
+};
+
+/* Auto-empty: drop completed items whose completion is older than 14 days. */
+const PURGE_DAYS=14;
+const purgeOldCompleted=s=>{
+  if(!s||!s.projects)return s;
+  const cutoff=Date.now()-PURGE_DAYS*24*60*60*1000;
+  const keep=it=>!(it.archived&&it.completedAt&&it.completedAt<cutoff);
+  const projects=s.projects.map(p=>({...p,tasks:(p.tasks||[]).filter(keep),reminders:(p.reminders||[]).filter(keep),events:(p.events||[]).filter(keep)}));
+  const liveIds=new Set(projects.flatMap(p=>p.tasks.map(t=>t.id)));
+  return{...s,projects,priorityIds:(s.priorityIds||[]).filter(id=>liveIds.has(id))};
+};
+
+/* ── Confirm Dialog ────────────────────────────────────────── */
+const ConfirmDialog = ({message,confirmLabel='Delete',onConfirm,onCancel}) => html`
+  <div style=${{position:'fixed',inset:0,zIndex:3000,background:'rgba(42,40,37,0.5)',display:'flex',alignItems:'center',justifyContent:'center'}} onClick=${onCancel}>
+    <div style=${{background:'white',borderRadius:14,padding:'24px 28px',boxShadow:'0 16px 48px rgba(0,0,0,0.2)',maxWidth:320,width:'90%'}} onClick=${e=>e.stopPropagation()}>
+      <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:17,marginBottom:10}}>Are you sure?</div>
+      <div style=${{fontSize:13,color:'#7A7068',marginBottom:20,lineHeight:1.5}}>${message}</div>
+      <div style=${{display:'flex',gap:10,justifyContent:'flex-end'}}>
+        <button onClick=${onCancel} style=${{background:'#F0EBE5',color:'#2A2825',border:'none',borderRadius:8,padding:'8px 16px',fontSize:13,cursor:'pointer',fontWeight:500}}>Cancel</button>
+        <button onClick=${onConfirm} style=${{background:'#2A2825',color:'white',border:'none',borderRadius:8,padding:'8px 16px',fontSize:13,cursor:'pointer',fontWeight:500}}>${confirmLabel}</button>
+      </div>
+    </div>
+  </div>`;
+
+/* ── Note Color Picker ─────────────────────────────────────── */
+const NoteColorPicker = ({projectColor,currentColor,gradientStep,onSelect,onClose,pos}) => {
+  const grad=generateGradientScale(projectColor);
+  useEffect(()=>{
+    const h=e=>{if(e.key==='Escape')onClose();};
+    document.addEventListener('keydown',h);return()=>document.removeEventListener('keydown',h);
+  },[]);
+  return html`
+    <div onClick=${e=>e.stopPropagation()} style=${{position:'fixed',top:pos.top,left:pos.left,zIndex:2000,background:'white',borderRadius:12,padding:'14px 16px',boxShadow:'0 12px 40px rgba(0,0,0,0.22)',border:'1px solid rgba(0,0,0,0.08)',minWidth:220}}>
+      <div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',marginBottom:8,fontWeight:600}}>Standard</div>
+      <div style=${{display:'flex',gap:7,flexWrap:'wrap',marginBottom:12}}>
+        ${STANDARD_COLORS.map(c=>html`<div key=${c} onClick=${()=>onSelect(c,null)} style=${{width:24,height:24,borderRadius:'50%',background:c,cursor:'pointer',flexShrink:0,border:currentColor===c&&gradientStep===null?'2.5px solid #2A2825':'1.5px solid rgba(0,0,0,0.12)'}}/>`)}</div>
+      <div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',marginBottom:8,fontWeight:600}}>Project Tones</div>
+      <div style=${{display:'flex',gap:7,marginBottom:12}}>
+        ${grad.map((c,i)=>html`<div key=${i} onClick=${()=>onSelect(c,i)} style=${{width:24,height:24,borderRadius:'50%',background:c,cursor:'pointer',flexShrink:0,border:gradientStep===i?'2.5px solid #2A2825':'1.5px solid rgba(0,0,0,0.12)'}}/>`)}</div>
+      <div onClick=${()=>onSelect(projectColor,null)} style=${{fontSize:12,color:'#9A9088',cursor:'pointer',textDecoration:'underline',textUnderlineOffset:3}}>Reset to project color</div>
+    </div>`;
+};
+
+/* ── Project Color Picker ──────────────────────────────────── */
+const ProjectColorPicker = ({current,onSelect,onClose}) => {
+  const pickerRef=useRef(null);
+  const[pos,setPos]=useState({top:'calc(100% + 6px)',bottom:'auto',left:0});
+  useEffect(()=>{
+    if(!pickerRef.current)return;
+    const r=pickerRef.current.getBoundingClientRect();
+    if(r.bottom>window.innerHeight-8)setPos({bottom:'calc(100% + 6px)',top:'auto',left:0});
+    const h=e=>{if(pickerRef.current&&!pickerRef.current.contains(e.target))onClose();};
+    setTimeout(()=>document.addEventListener('mousedown',h),0);
+    return()=>document.removeEventListener('mousedown',h);
+  },[onClose]);
+  const rows=[PROJECT_COLORS.slice(0,5),PROJECT_COLORS.slice(5,11),PROJECT_COLORS.slice(11,15),PROJECT_COLORS.slice(15)];
+  const labels=['Neutrals','Muted','Warm pastels','Cool pastels'];
+  return html`
+    <div ref=${pickerRef} onClick=${e=>e.stopPropagation()} style=${{position:'absolute',top:pos.top,bottom:pos.bottom,left:pos.left,zIndex:800,background:'white',borderRadius:12,padding:'12px 14px',boxShadow:'0 8px 32px rgba(0,0,0,0.18)',border:'1px solid rgba(0,0,0,0.06)',minWidth:250}}>
+      ${rows.map((row,ri)=>html`
+        <div key=${ri} style=${{marginBottom:ri<rows.length-1?10:0}}>
+          <div style=${{fontSize:10,letterSpacing:'0.7px',textTransform:'uppercase',color:'#B0A898',marginBottom:6,fontWeight:600}}>${labels[ri]}</div>
+          <div style=${{display:'flex',gap:6,flexWrap:'wrap'}}>
+            ${row.map(c=>html`<div key=${c} onClick=${()=>{onSelect(c);onClose();}} style=${{width:24,height:24,borderRadius:'50%',background:c,cursor:'pointer',flexShrink:0,border:current===c?'2.5px solid #2A2825':c==='#FFFFFF'?'1.5px solid rgba(0,0,0,0.2)':'1.5px solid rgba(0,0,0,0.1)'}}/>`)}</div>
+        </div>`)}
+    </div>`;
+};
+
+/* ── 3-dot Menu ────────────────────────────────────────────── */
+const ThreeDotMenu = ({onDelete}) => {
+  const[open,setOpen]=useState(false);
+  const ref=useRef(null);
+  useEffect(()=>{
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
+    document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h);
+  },[]);
+  return html`
+    <div ref=${ref} style=${{position:'relative',flexShrink:0}} onClick=${e=>e.stopPropagation()}>
+      <button onClick=${()=>setOpen(p=>!p)} style=${{background:open?'rgba(0,0,0,0.1)':'none',border:'none',cursor:'pointer',color:'rgba(0,0,0,0.4)',fontSize:17,lineHeight:1,padding:'2px 7px',borderRadius:6}}>⋯</button>
+      ${open&&html`<div style=${{position:'absolute',right:0,top:'calc(100% + 4px)',background:'white',borderRadius:10,boxShadow:'0 8px 28px rgba(0,0,0,0.14)',border:'1px solid rgba(0,0,0,0.06)',minWidth:150,zIndex:900}}>
+        <button onClick=${()=>{setOpen(false);onDelete();}} style=${{width:'100%',padding:'11px 16px',background:'none',border:'none',cursor:'pointer',textAlign:'left',fontSize:13,color:'#A0291E',borderRadius:10}}>Delete project</button>
+      </div>`}
+    </div>`;
+};
+
+/* ── Note Modal ────────────────────────────────────────────── */
+const NoteModal = ({note,onUpdate,onClose}) => {
+  const[title,setTitle]=useState(note.title||'');
+  const[text,setText]=useState(note.text||'');
+  const[items,setItems]=useState(note.checklistItems||[]);
+  const[newItem,setNewItem]=useState('');
+  const ck=darken(note.color);
+  const commit=(t,tx,it)=>onUpdate({...note,title:t,text:tx,checklistItems:it});
+  const addItem=()=>{if(!newItem.trim())return;const u=[...items,{id:uid(),text:newItem.trim(),done:false}];setItems(u);commit(title,text,u);setNewItem('');};
+  const toggleItem=id=>{const u=items.map(x=>x.id===id?{...x,done:!x.done}:x);setItems(u);commit(title,text,u);};
+  const deleteItem=id=>{const u=items.filter(x=>x.id!==id);setItems(u);commit(title,text,u);};
+  return html`
+    <div style=${{position:'fixed',inset:0,zIndex:1000,background:'rgba(42,40,37,0.75)',backdropFilter:'blur(6px)',display:'flex',alignItems:'center',justifyContent:'center'}} onClick=${onClose}>
+      <div style=${{background:note.color,borderRadius:14,width:'min(580px,95vw)',maxHeight:'85vh',position:'relative',boxShadow:'0 28px 72px rgba(0,0,0,0.35)',display:'flex',flexDirection:'column'}} onClick=${e=>e.stopPropagation()}>
+        <div style=${{height:40,background:'rgba(255,255,255,0.4)',borderBottom:'1px solid rgba(0,0,0,0.06)',display:'flex',alignItems:'center',justifyContent:'flex-end',padding:'0 14px',flexShrink:0,borderRadius:'14px 14px 0 0'}}>
+          <button onClick=${onClose} style=${{background:'rgba(42,40,37,0.12)',border:'none',borderRadius:'50%',width:26,height:26,cursor:'pointer',fontSize:15,color:'#2A2825',display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
+        </div>
+        <div style=${{flex:1,overflow:'auto'}}>
+          <div style=${{padding:'16px 20px'}}>
+            <input value=${title} onInput=${e=>{setTitle(e.target.value);commit(e.target.value,text,items);}} placeholder="Note title…"
+              style=${{width:'100%',background:'transparent',border:'none',outline:'none',fontFamily:"'DM Serif Display',serif",fontSize:20,color:'#2A2825',marginBottom:10,borderBottom:'1px solid rgba(0,0,0,0.1)',paddingBottom:6,display:'block'}}/>
+            <textarea value=${text} onInput=${e=>{setText(e.target.value);commit(title,e.target.value,items);}} placeholder="Write here…"
+              style=${{width:'100%',minHeight:140,background:'transparent',border:'none',outline:'none',resize:'none',fontFamily:"'Georgia','Times New Roman',serif",fontSize:20,color:'#3A3530',lineHeight:1.6,display:'block'}}/>
+            ${items.length>0&&html`<div style=${{marginTop:10,borderTop:'1px solid rgba(0,0,0,0.08)',paddingTop:10}}>
+              <div style=${{fontSize:11,letterSpacing:'0.7px',textTransform:'uppercase',color:'rgba(0,0,0,0.35)',marginBottom:8,fontWeight:600}}>Checklist</div>
+              ${items.map(it=>html`<div key=${it.id} style=${{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
+                <div onClick=${()=>toggleItem(it.id)} style=${{width:18,height:18,borderRadius:4,border:`2px solid ${ck}`,background:it.done?ck:'transparent',cursor:'pointer',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.12s'}}>
+                  ${it.done&&html`<svg width="9" height="7" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`}
+                </div>
+                <span style=${{fontFamily:"'Georgia','Times New Roman',serif",fontSize:19,flex:1,textDecoration:it.done?'line-through':'none',color:it.done?'rgba(0,0,0,0.35)':'#3A3530'}}>${it.text}</span>
+                <button onClick=${()=>deleteItem(it.id)} style=${{background:'none',border:'none',color:'rgba(0,0,0,0.25)',fontSize:16,cursor:'pointer',lineHeight:1,padding:'0 2px',flexShrink:0}}>×</button>
+              </div>`)}
+            </div>`}
+            <div style=${{display:'flex',alignItems:'center',gap:10,marginTop:12,borderTop:'1px solid rgba(0,0,0,0.08)',paddingTop:10}}>
+              <div style=${{width:18,height:18,borderRadius:4,border:`1.5px dashed ${ck}`,flexShrink:0}}/>
+              <input value=${newItem} onInput=${e=>setNewItem(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addItem();}} placeholder="Add checklist item…"
+                style=${{flex:1,background:'transparent',border:'none',outline:'none',fontFamily:"'Georgia','Times New Roman',serif",fontSize:19,color:'#3A3530'}}/>
+              ${newItem&&html`<button onClick=${addItem} style=${{background:'rgba(0,0,0,0.12)',border:'none',borderRadius:6,padding:'4px 10px',fontSize:12,cursor:'pointer',color:'#2A2825'}}>Add</button>`}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+};
+
+/* ── Draggable Notes ───────────────────────────────────────── */
+const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220}) => {
+  const[dragIdx,setDragIdx]=useState(null);
+  const[overCol,setOverCol]=useState(null);
+  const[overPos,setOverPos]=useState(null);
+  const isDragging=useRef(false);
+  const startIdx=useRef(null);
+  const dragState=useRef({overCol:null,overPos:null}); // stable ref for onPointerUp
+  const leftRefs=useRef([]);
+  const rightRefs=useRef([]);
+  const notesRef=useRef(notes);
+  useEffect(()=>{notesRef.current=notes;},[notes]);
+
+  // Split into columns: even indices -> left, odd -> right
+  const leftNotes=notes.map((n,i)=>({n,i})).filter(x=>x.i%2===0);
+  const rightNotes=notes.map((n,i)=>({n,i})).filter(x=>x.i%2!==0);
+
+  function getDropTarget(clientX,clientY){
+    // Determine col by X position
+    const lEl=leftRefs.current.find(Boolean);
+    const rEl=rightRefs.current.find(Boolean);
+    let col='L';
+    if(lEl&&rEl){
+      const lR=lEl.getBoundingClientRect();
+      const rR=rEl.getBoundingClientRect();
+      col=clientX>(lR.right+rR.left)/2?'R':'L';
+    } else if(rEl&&!lEl){col='R';}
+
+    const refs=col==='L'?leftRefs.current:rightRefs.current;
+    const colNotes=col==='L'?leftNotes:rightNotes;
+    let pos=colNotes.length; // default: append to end
+    for(let ci=0;ci<refs.length;ci++){
+      const el=refs[ci];if(!el)continue;
+      const r=el.getBoundingClientRect();
+      if(clientY<r.top+r.height/2){pos=ci;break;}
+    }
+    return{col,pos};
+  }
+
+  function applyReorder(fromFlatIdx,toCol,toPos){
+    const arr=[...notesRef.current];
+    const[moved]=arr.splice(fromFlatIdx,1);
+    // Rebuild columns after removal to find target flat index
+    const newLeft=arr.map((n,i)=>({n,i})).filter(x=>x.i%2===0);
+    const newRight=arr.map((n,i)=>({n,i})).filter(x=>x.i%2!==0);
+    const targetCol=toCol==='L'?newLeft:newRight;
+    const clampedPos=Math.min(toPos,targetCol.length);
+    if(clampedPos>=targetCol.length){
+      arr.push(moved);
+    } else {
+      arr.splice(targetCol[clampedPos].i,0,moved);
+    }
+    onReorder(arr);
+  }
+
+  function onPD(e,flatIdx){
+    e.preventDefault();e.stopPropagation();
+    isDragging.current=true;
+    startIdx.current=flatIdx;
+    setDragIdx(flatIdx);
+    // init over to current position
+    const col=flatIdx%2===0?'L':'R';
+    const pos=flatIdx%2===0?Math.floor(flatIdx/2):Math.floor(flatIdx/2);
+    dragState.current={overCol:col,overPos:pos};
+    setOverCol(col);setOverPos(pos);
+  }
+
+  useEffect(()=>{
+    function onMove(e){
+      if(!isDragging.current)return;
+      e.preventDefault();
+      const{col,pos}=getDropTarget(e.clientX,e.clientY);
+      dragState.current={overCol:col,overPos:pos};
+      setOverCol(col);setOverPos(pos);
+    }
+    function onUp(e){
+      if(!isDragging.current)return;
+      isDragging.current=false;
+      const fi=startIdx.current;
+      const{overCol:tc,overPos:tp}=dragState.current;
+      if(fi!==null&&tc!==null&&tp!==null){
+        applyReorder(fi,tc,tp);
+      }
+      startIdx.current=null;
+      setDragIdx(null);setOverCol(null);setOverPos(null);
+    }
+    window.addEventListener('pointermove',onMove,{passive:false});
+    window.addEventListener('pointerup',onUp);
+    return()=>{window.removeEventListener('pointermove',onMove);window.removeEventListener('pointerup',onUp);};
+  },[]);
+
+  const DragHandle=({flatIdx})=>html`
+    <div onPointerDown=${e=>onPD(e,flatIdx)}
+      onTouchStart=${e=>{e.preventDefault();e.stopPropagation();}}
+      style=${{height:18,display:'flex',alignItems:'center',justifyContent:'center',
+        cursor:'grab',userSelect:'none',WebkitUserSelect:'none',
+        touchAction:'none',WebkitTouchCallout:'none',
+        opacity:0.32,width:'100%',marginBottom:2}}>
+      <svg width="28" height="5" viewBox="0 0 28 5" fill="none">
+        <circle cx="3" cy="2.5" r="1.5" fill="#2A2825"/>
+        <circle cx="9" cy="2.5" r="1.5" fill="#2A2825"/>
+        <circle cx="15" cy="2.5" r="1.5" fill="#2A2825"/>
+        <circle cx="21" cy="2.5" r="1.5" fill="#2A2825"/>
+      </svg>
+    </div>`;
+
+  const DropLine=()=>html`<div style=${{height:3,background:'rgba(42,40,37,0.2)',borderRadius:2,margin:'2px 4px'}}/>`;
+
+  function renderCol(colNotes,col,refs){
+    return html`<div style=${{flex:1,display:'flex',flexDirection:'column',minWidth:0}}>
+      ${overCol===col&&overPos===0&&dragIdx!==null&&html`<${DropLine}/>`}
+      ${colNotes.map(({n,i},ci)=>html`
+        <div key=${n.id} ref=${el=>refs.current[ci]=el}
+          style=${{marginBottom:14,opacity:dragIdx===i?0.35:1,transition:'opacity 0.12s'}}>
+          <${DragHandle} flatIdx=${i}/>
+          ${renderNote(n,i)}
+          ${overCol===col&&overPos===ci+1&&dragIdx!==null&&html`<${DropLine}/>`}
+        </div>`)}
+      ${colNotes.length===0&&dragIdx!==null&&html`
+        <div style=${{height:48,border:'2px dashed rgba(0,0,0,0.1)',borderRadius:6,
+          display:'flex',alignItems:'center',justifyContent:'center',marginTop:4}}>
+          <span style=${{fontSize:11,color:'rgba(0,0,0,0.3)'}}>Drop here</span>
+        </div>`}
+    </div>`;
+  }
+
+  return html`<div style=${{display:'flex',gap:14,alignItems:'flex-start',minWidth:noteWidth*2+28}}>
+    ${renderCol(leftNotes,'L',leftRefs)}
+    ${renderCol(rightNotes,'R',rightRefs)}
+  </div>`;
+};
+/* ── Note 3-dot Menu ───────────────────────────────────────── */
+const NoteThreeDotMenu = ({onDelete}) => {
+  const[open,setOpen]=useState(false);
+  const ref=useRef(null);
+  useEffect(()=>{
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
+    document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h);
+  },[]);
+  return html`
+    <div ref=${ref} style=${{position:'relative'}} onClick=${e=>e.stopPropagation()}>
+      <button onClick=${()=>setOpen(p=>!p)}
+        style=${{background:open?'rgba(0,0,0,0.08)':'none',border:'none',cursor:'pointer',
+          color:'rgba(0,0,0,0.35)',fontSize:14,lineHeight:1,padding:'2px 4px',borderRadius:4}}>⋯</button>
+      ${open&&html`<div style=${{position:'absolute',right:0,top:'calc(100% + 2px)',background:'white',
+        borderRadius:8,boxShadow:'0 6px 24px rgba(0,0,0,0.14)',border:'1px solid rgba(0,0,0,0.06)',
+        minWidth:130,zIndex:900}}>
+        <button onClick=${()=>{setOpen(false);onDelete();}}
+          style=${{width:'100%',padding:'9px 13px',background:'none',border:'none',cursor:'pointer',
+            textAlign:'left',fontSize:12,color:'#A0291E',borderRadius:8}}>Delete note</button>
+      </div>`}
+    </div>`;
+};
+
+/* ── Sticky Note ───────────────────────────────────────────── */
+const StickyNote = ({note,onUpdate,onDelete,projectColor,noteWidth=220}) => {
+  const[showModal,setShowModal]=useState(false);
+  const[showCP,setShowCP]=useState(false);
+  const[pickerPos,setPickerPos]=useState({top:0,left:0});
+  const btnRef=useRef(null);
+  const taRef=useRef(null);
+  const collapsed=note.collapsed||false;
+  const ck=darken(note.color);
+
+  const openCP=e=>{
+    e.stopPropagation();
+    const r=btnRef.current?.getBoundingClientRect();
+    if(r)setPickerPos({top:Math.min(r.bottom+6,window.innerHeight-300),left:Math.max(4,Math.min(r.left,window.innerWidth-240))});
+    setShowCP(p=>!p);
+  };
+
+  const insertBullet=e=>{
+    e.stopPropagation();
+    const ta=taRef.current;if(!ta)return;
+    const start=ta.selectionStart,val=ta.value;
+    const lineStart=val.lastIndexOf('\n',start-1)+1;
+    const lineText=val.slice(lineStart,start);
+    let newVal,newCursor;
+    if(lineText.startsWith('• ')){newVal=val.slice(0,lineStart)+val.slice(lineStart+2);newCursor=start-2;}
+    else{newVal=val.slice(0,lineStart)+'• '+val.slice(lineStart);newCursor=start+2;}
+    onUpdate({...note,text:newVal});
+    setTimeout(()=>{ta.focus();ta.setSelectionRange(newCursor,newCursor);autoH(ta);},0);
+  };
+
+  const autoH=el=>{if(el){el.style.height='auto';el.style.height=el.scrollHeight+'px';}};
+
+  const handleText=e=>{
+    let val=e.target.value;
+    val=val.split('\n').map(l=>l.replace(/^(\s*)([-*])\s/,'$1• ')).join('\n');
+    onUpdate({...note,text:val});autoH(e.target);
+  };
+
+  return html`
+    <${Fragment}>
+      <div style=${{background:note.color,borderRadius:6,width:noteWidth,flexShrink:0,position:'relative',
+        boxShadow:'2px 4px 14px rgba(0,0,0,0.11)',display:'flex',flexDirection:'column',
+        transform:'rotate(-0.4deg)'}}>
+        <!-- Header: evenly spaced, taller, larger tap targets -->
+        <div style=${{height:36,background:'rgba(255,255,255,0.4)',
+          borderBottom:collapsed?'none':'1px solid rgba(0,0,0,0.05)',
+          display:'flex',alignItems:'center',justifyContent:'space-evenly',
+          padding:'0 6px',flexShrink:0,borderRadius:collapsed?'6px':'6px 6px 0 0',userSelect:'none'}}>
+          <!-- Color circle -->
+          <div ref=${btnRef} onClick=${openCP}
+            style=${{width:18,height:18,borderRadius:'50%',background:note.color,
+              border:'2px solid rgba(0,0,0,0.2)',cursor:'pointer',flexShrink:0,
+              boxShadow:'inset 0 0 0 1px rgba(255,255,255,0.5)'}} title="Change color"/>
+          <!-- Bullet -->
+          <button onClick=${insertBullet}
+            style=${{background:'none',border:'none',color:'rgba(0,0,0,0.38)',fontSize:16,
+              cursor:'pointer',lineHeight:1,padding:'4px 6px',fontWeight:700}} title="Insert bullet">•</button>
+          <!-- Expand -->
+          <button onClick=${e=>{e.stopPropagation();setShowModal(true);}}
+            style=${{background:'none',border:'none',color:'rgba(0,0,0,0.35)',fontSize:15,
+              cursor:'pointer',lineHeight:1,padding:'4px 6px'}} title="Expand">⤢</button>
+          <!-- Collapse -->
+          <button onClick=${e=>{e.stopPropagation();onUpdate({...note,collapsed:!collapsed});}}
+            style=${{background:'none',border:'none',color:'rgba(0,0,0,0.35)',fontSize:15,
+              cursor:'pointer',lineHeight:1,padding:'4px 6px',
+              transform:collapsed?'rotate(-90deg)':'rotate(0deg)',transition:'transform 0.2s'}}
+            title=${collapsed?'Expand':'Collapse'}>▾</button>
+          <!-- 3-dot menu -->
+          <${NoteThreeDotMenu} onDelete=${onDelete}/>
+        </div>
+        ${collapsed&&html`<div onClick=${e=>{e.stopPropagation();onUpdate({...note,collapsed:false});}} style=${{padding:'6px 10px',cursor:'pointer'}}>
+          <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:13,color:'#2A2825',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',opacity:0.85}}>
+            ${note.title||html`<span style=${{color:'rgba(0,0,0,0.5)',fontStyle:'italic',fontFamily:"'DM Sans',sans-serif",fontSize:12}}>Untitled note</span>`}
+          </div>
+        </div>`}
+        ${!collapsed&&html`<div style=${{padding:'8px 10px 10px'}}>
+          <input value=${note.title||''} onInput=${e=>onUpdate({...note,title:e.target.value})} onClick=${e=>e.stopPropagation()} placeholder="Title…"
+            style=${{width:'100%',background:'transparent',border:'none',outline:'none',fontFamily:"'DM Serif Display',serif",fontSize:14,color:'#2A2825',marginBottom:5,borderBottom:'1px solid rgba(0,0,0,0.08)',paddingBottom:4,display:'block'}}/>
+          <textarea value=${note.text||''} onInput=${handleText} onClick=${e=>e.stopPropagation()} placeholder="Note…"
+            style=${{width:'100%',background:'transparent',border:'none',outline:'none',resize:'none',fontFamily:"'Georgia','Times New Roman',serif",fontSize:12,color:'#3A3530',lineHeight:1.5,display:'block',minHeight:40,overflow:'hidden'}}
+            ref=${el=>{if(el&&el!==taRef.current){taRef.current=el;autoH(el);}}}/>
+          ${(note.checklistItems||[]).length>0&&html`<div style=${{marginTop:5,borderTop:'1px solid rgba(0,0,0,0.06)',paddingTop:5}}>
+            ${note.checklistItems.slice(0,4).map(it=>html`<div key=${it.id} style=${{display:'flex',alignItems:'center',gap:5,marginBottom:3}}>
+              <div onClick=${e=>{e.stopPropagation();onUpdate({...note,checklistItems:note.checklistItems.map(x=>x.id===it.id?{...x,done:!x.done}:x)});}} style=${{width:11,height:11,borderRadius:2,border:`1.5px solid ${ck}`,background:it.done?ck:'transparent',cursor:'pointer',flexShrink:0,transition:'all 0.12s'}}/>
+              <span style=${{fontSize:11,fontFamily:"'Georgia','Times New Roman',serif",color:'#3A3530',textDecoration:it.done?'line-through':'none',lineHeight:1.2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1}}>${it.text}</span>
+            </div>`)}
+            ${note.checklistItems.length>4&&html`<div style=${{fontSize:10,color:'rgba(0,0,0,0.3)',paddingLeft:16,marginTop:2}}>+${note.checklistItems.length-4} more — tap ⤢</div>`}
+          </div>`}
+        </div>`}
+      </div>
+      ${showCP&&html`<${NoteColorPicker} projectColor=${projectColor} currentColor=${note.color} gradientStep=${note.gradientStep} pos=${pickerPos} onSelect=${(c,s)=>{onUpdate({...note,color:c,gradientStep:s});setShowCP(false);}} onClose=${()=>setShowCP(false)}/>`}
+      ${showModal&&html`<${NoteModal} note=${note} onUpdate=${n=>onUpdate(n)} onClose=${()=>setShowModal(false)}/>`}
+    <//>`;
+};
+
+/* ── Task Row ──────────────────────────────────────────────── */
+const TaskRow = ({task,onToggleDone,onDelete,onEdit,onTogglePriority,onOpenPicker,accentColor,isPriority=false,compact=false}) => {
+  const[hov,setHov]=useState(false);
+  const[editing,setEditing]=useState(false);
+  const[draft,setDraft]=useState(task.text);
+  const inputRef=useRef(null);
+  const rowRef=useRef(null);
+  useEffect(()=>{if(editing)inputRef.current?.focus();},[editing]);
+  const commitEdit=()=>{setEditing(false);if(draft.trim()&&draft.trim()!==task.text)onEdit(task.id,draft.trim());else setDraft(task.text);};
+  const onPD=e=>{
+    if(e.pointerType!=='pen'&&e.pointerType!=='touch')return;
+    const r=rowRef.current?.getBoundingClientRect();if(!r)return;
+    const x=e.clientX-r.left,y=e.clientY-r.top;
+    if(Math.sqrt((x-(compact?10:14))**2+(y-r.height/2)**2)<28){e.preventDefault();onToggleDone(task.id);}
+  };
+  return html`
+    <div ref=${rowRef} onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)} onPointerDown=${onPD}
+      style=${{display:'flex',alignItems:'center',gap:8,padding:compact?'5px 10px':'8px 14px',borderRadius:8,
+        background:isPriority?PRIORITY_BG:hov?'rgba(0,0,0,0.025)':'transparent',transition:'background 0.12s',userSelect:'none'}}>
+      <div onClick=${()=>onToggleDone(task.id)} style=${{width:compact?14:16,height:compact?14:16,borderRadius:4,flexShrink:0,cursor:'pointer',border:task.done?`2px solid ${accentColor}`:'1.5px solid #C8C0B8',background:task.done?accentColor:'white',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s'}}>
+        ${task.done&&html`<svg width="8" height="6" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`}
+      </div>
+      ${editing?html`<input ref=${inputRef} value=${draft} onInput=${e=>setDraft(e.target.value)} onBlur=${commitEdit} onKeyDown=${e=>{if(e.key==='Enter')commitEdit();if(e.key==='Escape'){setEditing(false);setDraft(task.text);}}} style=${{flex:1,border:'none',outline:'none',background:'rgba(0,0,0,0.04)',borderRadius:4,padding:'2px 6px',fontSize:compact?12:13.5,color:'#2A2825'}}/>`
+        :html`<span style=${{flex:1,fontSize:compact?12:13.5,textDecoration:task.done?'line-through':'none',color:task.done?'#B0A898':'#2A2825',lineHeight:1.3,cursor:compact?'default':'text'}} onDblClick=${e=>{e.stopPropagation();if(!compact){setEditing(true);setDraft(task.text);}}}>${task.text}</span>`}
+      ${!compact&&onTogglePriority&&html`
+        <div style=${{display:'flex',alignItems:'center',gap:2,flexShrink:0,marginLeft:'auto'}}>
+          <!-- Calendar assign icon -->
+          ${onOpenPicker
+            ? html`<button onClick=${e=>{e.stopPropagation();onOpenPicker(e,task);}} title="Assign to a day"
+                style=${{...ICON_BTN,color:task.dueDate?'#5B8FBF':'#D0C8C0'}}><${CalIcon}/></button>`
+            : html`<span style=${ICON_SLOT}/>`}
+          <button onClick=${e=>{e.stopPropagation();onTogglePriority(task.id);}}
+            title=${isPriority?'Remove priority':'Mark priority'}
+            style=${{...ICON_BTN,fontSize:13,color:isPriority?PRIORITY_COLOR:'#D0C8C0'}}>
+            ${isPriority?'★':'☆'}
+          </button>
+          <button onClick=${e=>{e.stopPropagation();onDelete(task.id);}}
+            style=${{...ICON_BTN,fontSize:13,color:'#C0B8B0',
+              opacity:hov&&!editing?1:0,transition:'opacity 0.15s',
+              pointerEvents:hov&&!editing?'auto':'none'}}>×</button>
+        </div>`}
+      ${compact&&hov&&!editing&&onDelete&&html`<button onClick=${()=>onDelete(task.id)} style=${{background:'none',border:'none',color:'#C0B8B0',fontSize:13,cursor:'pointer',lineHeight:1,padding:'1px 3px',flexShrink:0}}>×</button>`}
+    </div>`;
+};
+
+/* ── Reminder Row ──────────────────────────────────────────── */
+const ReminderRow = ({reminder,onToggleDone,onToggleFlag,onDelete,onEdit,onOpenPicker,accentColor,compact=false}) => {
+  const[hov,setHov]=useState(false);
+  const[editing,setEditing]=useState(false);
+  const[draft,setDraft]=useState(reminder.text);
+  const inputRef=useRef(null);
+  const rowRef=useRef(null);
+  useEffect(()=>{if(editing)inputRef.current?.focus();},[editing]);
+  const commitEdit=()=>{setEditing(false);if(draft.trim()&&draft.trim()!==reminder.text)onEdit(reminder.id,draft.trim());else setDraft(reminder.text);};
+  const calBtnRef=useRef(null);
+  // picker lifted to ProjectStrip
+  const onPD=e=>{
+    if(e.pointerType!=='pen'&&e.pointerType!=='touch')return;
+    const r=rowRef.current?.getBoundingClientRect();if(!r)return;
+    const x=e.clientX-r.left,y=e.clientY-r.top;
+    if(Math.sqrt((x-(compact?10:14))**2+(y-r.height/2)**2)<28){e.preventDefault();onToggleDone(reminder.id);}
+  };
+  const flagColor=reminder.flagged?REMINDER_COLOR:'#D0C8C0';
+  const bg=reminder.flagged&&!compact?REMINDER_BG:hov?'rgba(0,0,0,0.025)':'transparent';
+  return html`
+    <div ref=${rowRef} onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)} onPointerDown=${onPD}
+      style=${{display:'flex',alignItems:'center',gap:8,padding:compact?'5px 10px':'8px 14px',borderRadius:8,background:bg,transition:'background 0.12s',userSelect:'none'}}>
+      <div onClick=${()=>onToggleDone(reminder.id)} style=${{width:compact?14:16,height:compact?14:16,borderRadius:4,flexShrink:0,cursor:'pointer',border:reminder.done?`2px solid ${accentColor||REMINDER_COLOR}`:'1.5px solid #C8C0B8',background:reminder.done?(accentColor||REMINDER_COLOR):'white',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s'}}>
+        ${reminder.done&&html`<svg width="8" height="6" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`}
+      </div>
+      ${editing?html`<input ref=${inputRef} value=${draft} onInput=${e=>setDraft(e.target.value)} onBlur=${commitEdit} onKeyDown=${e=>{if(e.key==='Enter')commitEdit();if(e.key==='Escape'){setEditing(false);setDraft(reminder.text);}}} style=${{flex:1,border:'none',outline:'none',background:'rgba(0,0,0,0.04)',borderRadius:4,padding:'2px 6px',fontSize:compact?12:13.5,color:'#2A2825'}}/>`
+        :html`<span style=${{flex:1,fontSize:compact?12:13.5,textDecoration:reminder.done?'line-through':'none',color:reminder.done?'#B0A898':'#2A2825',lineHeight:1.3,cursor:compact?'default':'text'}} onDblClick=${e=>{e.stopPropagation();if(!compact){setEditing(true);setDraft(reminder.text);}}}>${reminder.text}</span>`}
+      ${!compact&&html`
+        <div style=${{display:'flex',alignItems:'center',gap:2,flexShrink:0,marginLeft:'auto'}}>
+          <!-- Calendar assign -->
+          ${onOpenPicker
+            ? html`<button onClick=${e=>{e.stopPropagation();onOpenPicker(e,reminder);}} title="Assign to a day"
+                style=${{...ICON_BTN,color:reminder.dueDate?'#5B8FBF':'#D0C8C0'}}><${CalIcon}/></button>`
+            : html`<span style=${ICON_SLOT}/>`}
+          <!-- Flag -->
+          <button onClick=${e=>{e.stopPropagation();onToggleFlag(reminder.id);}}
+            title=${reminder.flagged?'Remove flag':'Flag reminder'}
+            style=${{...ICON_BTN,fontSize:13,color:flagColor}}>⚑</button>
+          <!-- Delete -->
+          <button onClick=${e=>{e.stopPropagation();onDelete(reminder.id);}}
+            style=${{...ICON_BTN,fontSize:13,color:'#C0B8B0',
+              opacity:hov&&!editing?1:0,transition:'opacity 0.15s',pointerEvents:hov&&!editing?'auto':'none'}}>×</button>
+        </div>`}
+    </div>`;
+};
+
+/* ── Project Strip ─────────────────────────────────────────── */
+/* ── Event Row ─────────────────────────────────────────────── */
+const EventRow = ({event,onToggleDone,onDelete,onEdit,onOpenPicker,onToggleImportant,accentColor}) => {
+  const[hov,setHov]=useState(false);
+  const[editing,setEditing]=useState(false);
+  const[draft,setDraft]=useState(event.text);
+  const inputRef=useRef(null);
+  useEffect(()=>{if(editing)inputRef.current?.focus();},[editing]);
+  const commitEdit=()=>{setEditing(false);if(draft.trim()&&draft.trim()!==event.text)onEdit(event.id,draft.trim());else setDraft(event.text);};
+  const isImportant=event.important||false;
+  const bg=isImportant?PRIORITY_BG:hov?'rgba(0,0,0,0.025)':'transparent';
+  return html`
+    <div onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)}
+      style=${{display:'flex',alignItems:'center',gap:8,padding:'8px 14px',borderRadius:8,
+        background:bg,transition:'background 0.12s',userSelect:'none'}}>
+      <div onClick=${()=>onToggleDone(event.id)}
+        style=${{width:16,height:16,borderRadius:4,flexShrink:0,cursor:'pointer',
+          border:event.done?`2px solid ${accentColor}`:'1.5px solid #C8C0B8',
+          background:event.done?accentColor:'white',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s'}}>
+        ${event.done&&html`<svg width="8" height="6" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`}
+      </div>
+      ${editing
+        ?html`<input ref=${inputRef} value=${draft} onInput=${e=>setDraft(e.target.value)}
+            onBlur=${commitEdit} onKeyDown=${e=>{if(e.key==='Enter')commitEdit();if(e.key==='Escape'){setEditing(false);setDraft(event.text);}}}
+            style=${{flex:1,border:'none',outline:'none',background:'rgba(0,0,0,0.04)',borderRadius:4,padding:'2px 6px',fontSize:13.5,color:'#2A2825'}}/>`
+        :html`<span style=${{flex:1,fontSize:13.5,textDecoration:event.done?'line-through':'none',
+            color:event.done?'#B0A898':'#2A2825',lineHeight:1.3,cursor:'text'}}
+            onDblClick=${e=>{e.stopPropagation();setEditing(true);setDraft(event.text);}}>
+            ${event.text}
+            ${event.taskTime&&html`<span style=${{fontSize:11,color:'#9A9088',marginLeft:4}}>
+              ${fmtTime(event.taskTime)}${event.endTime?'–'+fmtTime(event.endTime):''}
+            </span>`}
+          </span>`}
+      <div style=${{display:'flex',alignItems:'center',gap:2,flexShrink:0,marginLeft:'auto'}}>
+        <button onClick=${e=>{e.stopPropagation();onOpenPicker(e,event);}} title="Assign to a day"
+          style=${{...ICON_BTN,color:event.dueDate?'#5B8FBF':'#D0C8C0'}}><${CalIcon}/></button>
+        <button onClick=${e=>{e.stopPropagation();onToggleImportant(event.id);}}
+          title=${isImportant?'Remove important':'Mark important'}
+          style=${{...ICON_BTN,fontSize:13,color:isImportant?PRIORITY_COLOR:'#D0C8C0'}}>
+          ${isImportant?'★':'☆'}
+        </button>
+        <button onClick=${e=>{e.stopPropagation();onDelete(event.id);}}
+          style=${{...ICON_BTN,fontSize:13,color:'#C0B8B0',opacity:hov?1:0,transition:'opacity 0.15s',
+            pointerEvents:hov?'auto':'none'}}>×</button>
+      </div>
+    </div>`;
+};
+
+const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds,onTogglePriority,masterCollapsed,openColorPickerId,setOpenColorPickerId,weeks=1}) => {
+  const[newTask,setNewTask]=useState('');
+  const[newReminder,setNewReminder]=useState('');
+  const[newEvent,setNewEvent]=useState('');
+  const[confirm,setConfirm]=useState(false);
+  const[editingName,setEditingName]=useState(false);
+  const[nameDraft,setNameDraft]=useState(project.name);
+  const[leftCollapsed,setLeftCollapsed]=useState(false);
+  const[eventsCollapsed,setEventsCollapsed]=useState(false);
+  const[eventPickerData,setEventPickerData]=useState(null);
+  const[itemPickerData,setItemPickerData]=useState(null); // {item, kind, top, left}
+  const openItemPicker=(e,item,kind)=>{
+    const r=e.currentTarget.getBoundingClientRect();
+    const pH=420,pW=300,spaceBelow=window.innerHeight-(r.bottom+4);
+    const top=spaceBelow>=pH?r.bottom+4:Math.max(8,r.top-pH-4);
+    const left=Math.max(8,Math.min(r.left-120,window.innerWidth-pW-8));
+    setItemPickerData({item,kind,top,left});
+  };
+  const openEventPicker=(e,ev)=>{
+    const r=e.currentTarget.getBoundingClientRect();
+    const pickerH=440,pickerW=300;
+    const spaceBelow=window.innerHeight-(r.bottom+4);
+    const top=spaceBelow>=pickerH
+      ?r.bottom+4
+      :Math.max(8,r.top-pickerH-4);
+    const left=Math.max(8,Math.min(r.left,window.innerWidth-pickerW-8));
+    setEventPickerData({event:ev,top,left});
+  };
+  const nameInputRef=useRef(null);
+  const isColorOpen=openColorPickerId===project.id;
+  useEffect(()=>{if(editingName)nameInputRef.current?.focus();},[editingName]);
+
+  const updateTasks=t=>onUpdate({...project,tasks:t});
+  const updateReminders=r=>onUpdate({...project,reminders:r});
+  const updateNotes=n=>onUpdate({...project,notes:n});
+  const addTask=()=>{const{text,due}=extractDue(newTask);if(!text)return;updateTasks([...project.tasks,{id:uid(),text,done:false,...(due?{dueDate:due}:{})}]);setNewTask('');};
+  const toggleDone=id=>{const tasks=project.tasks.map(t=>t.id===id?{...t,done:!t.done,completedAt:!t.done?Date.now():null}:t);updateTasks([...tasks.filter(t=>!t.done),...tasks.filter(t=>t.done)]);};
+  const deleteTask=id=>updateTasks(project.tasks.filter(t=>t.id!==id));
+  const editTask=(id,text)=>updateTasks(project.tasks.map(t=>t.id===id?{...t,text}:t));
+  const assignDay=(id,day,time,end)=>updateTasks(project.tasks.map(t=>t.id===id?{...t,dueDate:day,taskTime:time,endTime:end}:t));
+  const addReminder=()=>{const{text,due}=extractDue(newReminder);if(!text)return;updateReminders([...(project.reminders||[]),{id:uid(),text,done:false,flagged:false,...(due?{dueDate:due}:{})}]);setNewReminder('');};
+  const toggleReminderDone=id=>{const r=(project.reminders||[]).map(x=>x.id===id?{...x,done:!x.done,completedAt:!x.done?Date.now():null}:x);updateReminders([...r.filter(x=>!x.done),...r.filter(x=>x.done)]);};
+  const toggleReminderFlag=id=>updateReminders((project.reminders||[]).map(r=>r.id===id?{...r,flagged:!r.flagged}:r));
+  const deleteReminder=id=>updateReminders((project.reminders||[]).filter(r=>r.id!==id));
+  const editReminder=(id,text)=>updateReminders((project.reminders||[]).map(r=>r.id===id?{...r,text}:r));
+  const updateEvents=ev=>onUpdate({...project,events:ev});
+  const addEvent=(raw)=>{const{text,due}=extractDue(raw||'');if(!text)return;updateEvents([...(project.events||[]),{id:uid(),text,done:false,important:false,dueDate:due,taskTime:null,endTime:null}]);};
+  const toggleEventDone=id=>{const ev=(project.events||[]).map(e=>e.id===id?{...e,done:!e.done,completedAt:!e.done?Date.now():null}:e);updateEvents([...ev.filter(e=>!e.done),...ev.filter(e=>e.done)]);};
+  const deleteEvent=id=>updateEvents((project.events||[]).filter(e=>e.id!==id));
+  const editEvent=(id,text)=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,text}:e));
+  const toggleEventImportant=id=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,important:!e.important}:e));
+  const assignEventDay=(id,day,time,end)=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,dueDate:day,taskTime:time,endTime:end}:e));
+  const assignReminderDay=(id,day,time,end)=>updateReminders((project.reminders||[]).map(r=>r.id===id?{...r,dueDate:day,taskTime:time,endTime:end}:r));
+  const addNote=()=>updateNotes([...project.notes,{id:uid(),title:'',text:'',color:defaultNoteColor(project.color),gradientStep:null,checklistItems:[],collapsed:false}]);
+  const updateNote=u=>updateNotes(project.notes.map(n=>n.id===u.id?u:n));
+  const deleteNote=id=>updateNotes(project.notes.filter(n=>n.id!==id));
+  const handleColorChange=color=>{
+    const ns=generateGradientScale(color);
+    const notes=project.notes.map(n=>{if(n.gradientStep!=null)return{...n,color:ns[n.gradientStep]};if(n.color===project.color||n.color===defaultNoteColor(project.color))return{...n,color:defaultNoteColor(color)};return n;});
+    onUpdate({...project,color,notes});
+  };
+  const commitName=()=>{setEditingName(false);if(nameDraft.trim()&&nameDraft.trim()!==project.name)onUpdate({...project,name:nameDraft.trim()});else setNameDraft(project.name);};
+  const activeTasks=project.tasks.filter(t=>!t.done),doneTasks=project.tasks.filter(t=>t.done&&!t.archived);
+  const activeReminders=(project.reminders||[]).filter(r=>!r.done),doneReminders=(project.reminders||[]).filter(r=>r.done&&!r.archived);
+  // Checked-but-not-yet-swept items, plus the action that archives them to Master Completed.
+  const pendingComplete=[...project.tasks.filter(t=>t.done&&!t.archived),...(project.reminders||[]).filter(r=>r.done&&!r.archived),...(project.events||[]).filter(e=>e.done&&!e.archived)];
+  const sweepCompleted=()=>{
+    const stamp=Date.now();
+    const arch=it=>(it.done&&!it.archived)?{...it,archived:true,completedAt:stamp}:it;
+    onUpdate({...project,tasks:project.tasks.map(arch),reminders:(project.reminders||[]).map(arch),events:(project.events||[]).map(arch)});
+  };
+  const textColor=isLight(project.color)?'#2A2825':'rgba(255,255,255,0.9)';
+  const subColor=isLight(project.color)?'rgba(0,0,0,0.35)':'rgba(255,255,255,0.55)';
+
+  return html`
+    <${Fragment}>
+      ${confirm&&html`<${ConfirmDialog} message=${`"${project.name}" and all its tasks and notes will be permanently deleted.`} onConfirm=${()=>{setConfirm(false);onDelete(project.id);}} onCancel=${()=>setConfirm(false)}/>`}
+      <div style=${{background:'white',borderRadius:16,overflow:'visible',boxShadow:isExpanded?'0 6px 28px rgba(0,0,0,0.09)':'0 1px 5px rgba(0,0,0,0.06)',border:'1px solid rgba(0,0,0,0.04)',transition:'box-shadow 0.2s'}}>
+        <div style=${{background:project.color,padding:'12px 14px',display:'flex',alignItems:'center',gap:9,cursor:'pointer',userSelect:'none',borderRadius:isExpanded?'14px 14px 0 0':'14px'}} onClick=${onToggle}>
+          <div style=${{position:'relative',flexShrink:0}} onClick=${e=>e.stopPropagation()}>
+            <div onClick=${()=>setOpenColorPickerId(isColorOpen?null:project.id)} style=${{width:16,height:16,borderRadius:'50%',background:project.color,cursor:'pointer',border:isLight(project.color)?'2px solid rgba(0,0,0,0.2)':'2px solid rgba(255,255,255,0.4)',boxShadow:'inset 0 0 0 2px rgba(255,255,255,0.3)',flexShrink:0}} title="Change color"/>
+            ${isColorOpen&&html`<${ProjectColorPicker} current=${project.color} onSelect=${c=>{handleColorChange(c);setOpenColorPickerId(null);}} onClose=${()=>setOpenColorPickerId(null)}/>`}
+          </div>
+          <div style=${{flex:1,minWidth:0}} onClick=${e=>e.stopPropagation()}>
+            ${editingName?html`<input ref=${nameInputRef} value=${nameDraft} onInput=${e=>setNameDraft(e.target.value)} onBlur=${commitName} onKeyDown=${e=>{if(e.key==='Enter')commitName();if(e.key==='Escape'){setEditingName(false);setNameDraft(project.name);}}} style=${{fontFamily:"'DM Serif Display',serif",fontSize:16,fontWeight:400,color:textColor,background:'rgba(255,255,255,0.25)',border:'none',outline:'none',borderRadius:4,padding:'1px 6px',width:'100%'}}/>`
+              :html`<span style=${{fontFamily:"'DM Serif Display',serif",fontSize:16,fontWeight:400,color:textColor,display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',cursor:'text'}} onDblClick=${e=>{e.stopPropagation();setEditingName(true);setNameDraft(project.name);}} title="Double-tap to rename">${project.name}</span>`}
+          </div>
+          ${pendingComplete.length>0&&html`<button onClick=${e=>{e.stopPropagation();sweepCompleted();}}
+            title="Move completed tasks, reminders & events to Master Completed"
+            style=${{flexShrink:0,display:'flex',alignItems:'center',gap:4,background:isLight(project.color)?'rgba(0,0,0,0.08)':'rgba(255,255,255,0.22)',color:textColor,border:'none',borderRadius:12,padding:'3px 9px',fontSize:11,fontWeight:500,cursor:'pointer'}}>
+            <svg width="11" height="9" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Complete ${pendingComplete.length}
+          </button>`}
+          <div onClick=${e=>e.stopPropagation()}><${ThreeDotMenu} onDelete=${()=>setConfirm(true)}/></div>
+          <span style=${{fontSize:11,color:subColor,transform:isExpanded?'rotate(180deg)':'none',transition:'transform 0.2s',display:'inline-block',flexShrink:0,marginLeft:2}}>▾</span>
+        </div>
+        ${isExpanded&&html`<div style=${{display:'flex',borderRadius:'0 0 14px 14px',overflow:'visible'}}>
+
+          <!-- Left panel: collapsed tab or full tasks+reminders -->
+          ${leftCollapsed
+            ? html`<div style=${{width:28,flexShrink:0,borderRight:'1px solid #F0EBE5',background:'#FAFAF8',position:'relative',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                <button onClick=${()=>setLeftCollapsed(false)}
+                  style=${{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%) rotate(90deg)',background:'none',border:'none',color:'#9A9088',fontSize:10,cursor:'pointer',whiteSpace:'nowrap',letterSpacing:'0.5px',userSelect:'none'}}>
+                  TASKS ▸
+                </button>
+              </div>`
+            : html`<div style=${{flex:'0 0 33%',minWidth:200,maxWidth:300,borderRight:'1px solid #F0EBE5',display:'flex',flexDirection:'column'}}>
+                <!-- Tasks header with collapse button -->
+                <div style=${{padding:'8px 14px 3px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                  <span style=${{fontSize:10,letterSpacing:'0.9px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>Tasks</span>
+                  <button onClick=${()=>setLeftCollapsed(true)}
+                    style=${{background:'none',border:'none',color:'#C0B8B0',fontSize:12,cursor:'pointer',lineHeight:1,padding:'0 2px'}} title="Collapse tasks & reminders">◁</button>
+                </div>
+                <div>
+                  ${activeTasks.length===0&&doneTasks.length===0&&html`<div style=${{padding:'6px 14px 4px',color:'#C0B8B0',fontSize:12,fontStyle:'italic'}}>No tasks yet</div>`}
+                  ${activeTasks.map(t=>html`<${TaskRow} key=${t.id} task=${t} onToggleDone=${toggleDone} onDelete=${deleteTask} onEdit=${editTask} onTogglePriority=${onTogglePriority} onOpenPicker=${(e,t)=>openItemPicker(e,t,'task')} accentColor=${project.color} isPriority=${priorityIds.includes(t.id)}/>`)}
+                  ${doneTasks.map(t=>html`<${TaskRow} key=${t.id} task=${t} onToggleDone=${toggleDone} onDelete=${deleteTask} onEdit=${editTask} accentColor=${project.color}/>`)}
+                </div>
+                <div style=${{display:'flex',alignItems:'center',gap:8,padding:'4px 14px 10px',borderTop:'1px solid #F7F3EF',marginTop:2}}>
+                  <div style=${{width:15,height:15,borderRadius:3,border:'1.5px dashed #C8C0B8',flexShrink:0}}/>
+                  <input value=${newTask} onInput=${e=>setNewTask(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addTask();}} placeholder="Add a task…  @6126 = due" style=${{flex:1,minWidth:0,background:'none',border:'none',outline:'none',fontSize:13,color:'#2A2825'}}/>
+                  ${extractDue(newTask).due&&html`<span title="Due ${isoToLong(extractDue(newTask).due)}" style=${{flexShrink:0,fontSize:11,fontWeight:600,color:'#5B8FBF',whiteSpace:'nowrap'}}>${isoToShort(extractDue(newTask).due)}</span>`}
+                  ${newTask&&html`<button onClick=${addTask} style=${{background:'#2A2825',color:'white',border:'none',borderRadius:5,padding:'3px 9px',fontSize:11,cursor:'pointer'}}>Add</button>`}
+                </div>
+                <div style=${{borderTop:'1px solid #EAE4DC',padding:'8px 14px 3px'}}>
+                  <span style=${{fontSize:10,letterSpacing:'0.9px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>Reminders</span>
+                </div>
+                <div>
+                  ${activeReminders.length===0&&doneReminders.length===0&&html`<div style=${{padding:'6px 14px 4px',color:'#C0B8B0',fontSize:12,fontStyle:'italic'}}>No reminders yet</div>`}
+                  ${activeReminders.map(r=>html`<${ReminderRow} key=${r.id} reminder=${r} onToggleDone=${toggleReminderDone} onToggleFlag=${toggleReminderFlag} onDelete=${deleteReminder} onEdit=${editReminder} onOpenPicker=${(e,r)=>openItemPicker(e,r,'reminder')} accentColor=${project.color}/>`)}
+                  ${doneReminders.map(r=>html`<${ReminderRow} key=${r.id} reminder=${r} onToggleDone=${toggleReminderDone} onToggleFlag=${toggleReminderFlag} onDelete=${deleteReminder} onEdit=${editReminder} onOpenPicker=${(e,r)=>openItemPicker(e,r,'reminder')} accentColor=${project.color}/>`)}
+                </div>
+                <div style=${{display:'flex',alignItems:'center',gap:8,padding:'4px 14px 14px',borderTop:'1px solid #F7F3EF',marginTop:2}}>
+                  <div style=${{width:15,height:15,borderRadius:3,border:'1.5px dashed #C8C0B8',flexShrink:0}}/>
+                  <input value=${newReminder} onInput=${e=>setNewReminder(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addReminder();}} placeholder="Add a reminder…  @date" style=${{flex:1,minWidth:0,background:'none',border:'none',outline:'none',fontSize:13,color:'#2A2825'}}/>
+                  ${extractDue(newReminder).due&&html`<span title="Due ${isoToLong(extractDue(newReminder).due)}" style=${{flexShrink:0,fontSize:11,fontWeight:600,color:'#5B8FBF',whiteSpace:'nowrap'}}>${isoToShort(extractDue(newReminder).due)}</span>`}
+                  ${newReminder&&html`<button onClick=${addReminder} style=${{background:'#2A2825',color:'white',border:'none',borderRadius:5,padding:'3px 9px',fontSize:11,cursor:'pointer'}}>Add</button>`}
+                </div>
+              </div>`}
+
+          <!-- Sticky notes panel -->
+          <div style=${{flex:1,padding:'12px 16px 16px',minWidth:0,overflowX:'auto',overflowY:'visible',WebkitOverflowScrolling:'touch'}}>
+            <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
+              <span style=${{fontSize:10,letterSpacing:'0.9px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>Sticky Notes</span>
+              <button onClick=${addNote} style=${{background:'#F7F5F2',color:'#7A7068',border:'1px solid #E0D8D0',borderRadius:6,padding:'3px 10px',fontSize:11,cursor:'pointer',fontWeight:500}}>+ Note</button>
+            </div>
+            ${project.notes.length===0
+              ?html`<div style=${{color:'#C0B8B0',fontSize:12,fontStyle:'italic',lineHeight:1.6}}>Add sticky notes for this project.<br/><span style=${{fontSize:11}}>Tap color circle to recolor. Tap ⤢ to expand. Drag handle above note to reorder.</span></div>`
+              :html`<${DraggableNotes} notes=${project.notes} onReorder=${updateNotes} noteWidth=${leftCollapsed?(masterCollapsed?380:320):(masterCollapsed?280:220)}
+                renderNote=${(note)=>html`<${StickyNote} key=${note.id} note=${note} onUpdate=${updateNote} onDelete=${()=>deleteNote(note.id)} projectColor=${project.color} noteWidth=${leftCollapsed?(masterCollapsed?380:320):(masterCollapsed?280:220)}/>`}/>`}
+          </div>
+
+          <!-- Events panel (right, collapsible) -->
+          ${eventsCollapsed
+            ?html`<div style=${{width:28,flexShrink:0,borderLeft:'1px solid #F0EBE5',background:'#FAFAF8',position:'relative',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                <button onClick=${()=>setEventsCollapsed(false)}
+                  style=${{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%) rotate(90deg)',background:'none',border:'none',color:'#9A9088',fontSize:10,cursor:'pointer',whiteSpace:'nowrap',letterSpacing:'0.5px',userSelect:'none'}}>
+                  EVENTS ▸
+                </button>
+              </div>`
+            :html`<div style=${{flex:'0 0 22%',minWidth:160,maxWidth:220,borderLeft:'1px solid #F0EBE5',display:'flex',flexDirection:'column'}}>
+                <div style=${{padding:'8px 14px 3px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                  <span style=${{fontSize:10,letterSpacing:'0.9px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>Events</span>
+                  <button onClick=${()=>setEventsCollapsed(true)} style=${{background:'none',border:'none',color:'#C0B8B0',fontSize:12,cursor:'pointer',lineHeight:1}} title="Collapse events">◁</button>
+                </div>
+                <div style=${{flex:1,overflowY:'auto'}}>
+                  ${(project.events||[]).length===0&&html`<div style=${{padding:'6px 14px 4px',color:'#C0B8B0',fontSize:12,fontStyle:'italic'}}>No events yet</div>`}
+                  ${(project.events||[]).filter(e=>!e.done).map(e=>html`<${EventRow} key=${e.id} event=${e}
+                    onToggleDone=${toggleEventDone} onDelete=${deleteEvent} onEdit=${editEvent}
+                    onOpenPicker=${openEventPicker} onToggleImportant=${toggleEventImportant}
+                    accentColor=${project.color}/>`)}
+                  ${(project.events||[]).filter(e=>e.done&&!e.archived).map(e=>html`<${EventRow} key=${e.id} event=${e}
+                    onToggleDone=${toggleEventDone} onDelete=${deleteEvent} onEdit=${editEvent}
+                    onOpenPicker=${openEventPicker} onToggleImportant=${toggleEventImportant}
+                    accentColor=${project.color}/>`)}
+                </div>
+                <div style=${{display:'flex',alignItems:'center',gap:8,padding:'4px 14px 14px',borderTop:'1px solid #F7F3EF',marginTop:2}}>
+                  <div style=${{width:15,height:15,borderRadius:3,border:'1.5px dashed #C8C0B8',flexShrink:0}}/>
+                  <input value=${newEvent} onInput=${e=>setNewEvent(e.target.value)}
+                    onKeyDown=${e=>{if(e.key==='Enter'){addEvent(newEvent);setNewEvent('');}}}
+                    placeholder="Add an event…  @date"
+                    style=${{flex:1,minWidth:0,background:'none',border:'none',outline:'none',fontSize:13,color:'#2A2825'}}/>
+                  ${extractDue(newEvent).due&&html`<span title="Due ${isoToLong(extractDue(newEvent).due)}" style=${{flexShrink:0,fontSize:11,fontWeight:600,color:'#5B8FBF',whiteSpace:'nowrap'}}>${isoToShort(extractDue(newEvent).due)}</span>`}
+                  ${newEvent&&html`<button onClick=${()=>{addEvent(newEvent);setNewEvent('');}}
+                    style=${{background:'#2A2825',color:'white',border:'none',borderRadius:5,padding:'3px 9px',fontSize:11,cursor:'pointer'}}>Add</button>`}
+                </div>
+              </div>`}
+        </div>`}
+      </div>
+      ${eventPickerData&&html`<div style=${{position:'fixed',top:eventPickerData.top,left:eventPickerData.left,zIndex:9999}}>
+        <${DayTimePicker} task=${eventPickerData.event} isEvent=${true} weeks=${weeks}
+          onAssign=${(day,time,end)=>{assignEventDay(eventPickerData.event.id,day,time,end);setEventPickerData(null);}}
+          onClose=${()=>setEventPickerData(null)}/>
+      </div>`}
+      ${itemPickerData&&html`<div style=${{position:'fixed',top:itemPickerData.top,left:itemPickerData.left,zIndex:9999}}>
+        <${DayTimePicker} task=${itemPickerData.item} weeks=${weeks}
+          onAssign=${(day,time,end)=>{
+            if(itemPickerData.kind==='task')assignDay(itemPickerData.item.id,day,time,end);
+            else assignReminderDay(itemPickerData.item.id,day,time,end);
+            setItemPickerData(null);
+          }}
+          onClose=${()=>setItemPickerData(null)}/>
+      </div>`}
+    <//>`;
+};
+
+/* ── Draggable Projects ────────────────────────────────────── */
+const DraggableProjects = ({projects,onReorder,renderProject}) => {
+  const[dragIdx,setDragIdx]=useState(null);
+  const[overIdx,setOverIdx]=useState(null);
+  const itemRefs=useRef([]);
+  const isDragging=useRef(false);
+  const startIdx=useRef(null);
+
+  const getIdxAtY=y=>{
+    let best=null,bestDist=Infinity;
+    itemRefs.current.forEach((el,i)=>{
+      if(!el)return;const r=el.getBoundingClientRect(),cy=(r.top+r.bottom)/2,d=Math.abs(y-cy);
+      if(d<bestDist){bestDist=d;best=i;}
+    });
+    return best;
+  };
+
+  const onHandlePD=(e,idx)=>{
+    e.preventDefault();e.stopPropagation();
+    try{e.currentTarget.setPointerCapture(e.pointerId);}catch(err){}
+    isDragging.current=true;startIdx.current=idx;setDragIdx(idx);setOverIdx(idx);
+  };
+  const onHandlePM=e=>{if(!isDragging.current)return;e.preventDefault();const idx=getIdxAtY(e.clientY);if(idx!==null)setOverIdx(idx);};
+  const onHandlePU=e=>{
+    if(!isDragging.current)return;e.preventDefault();isDragging.current=false;
+    const from=startIdx.current,to=overIdx;
+    if(from!==null&&to!==null&&from!==to){const arr=[...projects];const[m]=arr.splice(from,1);arr.splice(to,0,m);onReorder(arr);}
+    setDragIdx(null);setOverIdx(null);startIdx.current=null;
+  };
+
+  return html`
+    <div style=${{display:'flex',flexDirection:'column',gap:12}} onPointerMove=${onHandlePM} onPointerUp=${onHandlePU}>
+      ${projects.map((p,i)=>html`
+        <div key=${p.id} ref=${el=>itemRefs.current[i]=el}
+          style=${{opacity:dragIdx===i?0.45:1,outline:overIdx===i&&dragIdx!==null&&dragIdx!==i?'2px dashed #C8B8A2':'none',borderRadius:16,transition:'opacity 0.12s'}}>
+          <div style=${{display:'flex',flexDirection:'column'}}>
+            <div onPointerDown=${e=>onHandlePD(e,i)}
+              onTouchStart=${e=>{e.preventDefault();e.stopPropagation();}}
+              style=${{height:18,display:'flex',alignItems:'center',justifyContent:'center',cursor:'grab',userSelect:'none',WebkitUserSelect:'none',touchAction:'none',WebkitTouchCallout:'none',opacity:0.3,marginBottom:0}}>
+              <svg width="32" height="6" viewBox="0 0 32 6" fill="none">
+                <circle cx="4" cy="3" r="1.5" fill="#2A2825"/>
+                <circle cx="11" cy="3" r="1.5" fill="#2A2825"/>
+                <circle cx="18" cy="3" r="1.5" fill="#2A2825"/>
+                <circle cx="25" cy="3" r="1.5" fill="#2A2825"/>
+              </svg>
+            </div>
+            ${renderProject(p,i)}
+          </div>
+        </div>`)}
+    </div>`;
+};
+
+/* ── Master Panel ──────────────────────────────────────────── */
+/* ── Master Item (top-level to prevent remount on every render) ── */
+const MasterItem = ({item,onToggleDone,onToggleReminderDone,onToggleEventDone,onTogglePriority,onAssignDay,priorityIds,weeks=1}) => {
+  const[hov,setHov]=useState(false);
+  const[showPicker,setShowPicker]=useState(false);
+  const[pickerPos,setPickerPos]=useState({top:0,left:0});
+  const pickerRef=useRef(null);
+  const isPri=priorityIds.includes(item.id);
+  const openPicker=e=>{
+    e.stopPropagation();
+    const r=pickerRef.current?.getBoundingClientRect();
+    if(!r)return;
+    const pickerH=420,pickerW=300;
+    const spaceBelow=window.innerHeight-(r.bottom+4);
+    const top=spaceBelow>=pickerH?r.bottom+4:Math.max(8,r.top-pickerH-4);
+    const left=Math.max(8,Math.min(r.left,window.innerWidth-pickerW-8));
+    setPickerPos({top,left});
+    setShowPicker(p=>!p);
+  };
+  return html`
+    <${Fragment}>
+    <div onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)}
+      style=${{display:'flex',alignItems:'center',gap:6,padding:'5px 10px',borderRadius:6,background:hov?'rgba(0,0,0,0.025)':'transparent',transition:'background 0.12s',userSelect:'none'}}>
+      <div onClick=${()=>item.kind==='event'?(onToggleEventDone&&onToggleEventDone(item.projectId,item.id)):item.kind==='reminder'?onToggleReminderDone(item.projectId,item.id):onToggleDone(item.projectId,item.id)}
+        style=${{width:14,height:14,borderRadius:3,flexShrink:0,cursor:'pointer',border:item.done?`2px solid ${item.projectColor}`:'1.5px solid #C8C0B8',background:item.done?item.projectColor:'white',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s'}}>
+        ${item.done&&html`<svg width="7" height="6" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`}
+      </div>
+      <div style=${{width:6,height:6,borderRadius:'50%',background:item.projectColor,flexShrink:0}}/>
+      <span style=${{flex:1,fontSize:12,textDecoration:item.done?'line-through':'none',color:item.done?'#B0A898':'#2A2825',lineHeight:1.3}}>${item.text}</span>
+      ${item.dueDate&&!item.done&&item.dueDate<todayISO()&&html`<span title="Was due ${isoToLong(item.dueDate)}" style=${{flexShrink:0,fontSize:9.5,fontWeight:600,color:'#C7493A',background:'rgba(199,73,58,0.12)',borderRadius:4,padding:'1px 5px',marginRight:2}}>${isoToMDY(item.dueDate)}</span>`}
+      <div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:2,flexShrink:0,marginLeft:'auto'}}>
+        <!-- Calendar slot -->
+        ${!item.done&&(item.kind==='task'||item.kind==='reminder')&&onAssignDay
+          ? html`<button ref=${pickerRef} onClick=${openPicker} title="Assign to a day"
+              style=${{...ICON_BTN,color:item.dueDate?'#5B8FBF':'#D0C8C0'}}><${CalIcon}/></button>`
+          : html`<span style=${ICON_SLOT}/>`}
+        <!-- Priority / flag slot -->
+        ${!item.done&&item.kind==='task'
+          ? html`<button onClick=${()=>onTogglePriority(item.id)} title=${isPri?'Remove priority':'Mark priority'}
+              style=${{...ICON_BTN,fontSize:14,color:isPri?PRIORITY_COLOR:'#D0C8C0'}}>${isPri?'★':'☆'}</button>`
+          : (item.kind==='reminder'&&!item.done
+            ? html`<span style=${{...ICON_BTN,fontSize:12,color:REMINDER_COLOR,cursor:'default'}}>⚑</span>`
+            : html`<span style=${ICON_SLOT}/>`)}
+      </div>
+    </div>
+    ${showPicker&&html`<div style=${{position:'fixed',top:pickerPos.top,left:pickerPos.left,zIndex:3000}}>
+      <${DayTimePicker} task=${item} weeks=${weeks} onAssign=${(day,time,end)=>{onAssignDay(item.projectId,item.id,day,time,end);setShowPicker(false);}} onClose=${()=>setShowPicker(false)}/>
+    </div>`}
+    <//>`;
+};
+
+const MasterPanel = ({projects,priorityIds,onToggleDone,onTogglePriority,onToggleReminderDone,onToggleEventDone,onAssignDay,onReorderPriority,onEmptyCompleted,completedExpanded,onToggleCompleted,collapsed,onToggleCollapse,weeks=1}) => {
+  const[confirmEmpty,setConfirmEmpty]=useState(false);
+  const[priDragOver,setPriDragOver]=useState(null);
+  const priDragId=useRef(null);
+
+  const allTasks=projects.flatMap(p=>p.tasks.map(t=>({...t,kind:'task',projectId:p.id,projectName:p.name,projectColor:p.color})));
+  const allReminders=projects.flatMap(p=>(p.reminders||[]).map(r=>({...r,kind:'reminder',projectId:p.id,projectName:p.name,projectColor:p.color})));
+  const allEvents=projects.flatMap(p=>(p.events||[]).map(e=>({...e,kind:'event',projectId:p.id,projectName:p.name,projectColor:p.color})));
+  const tdy=todayISO();
+  // Overdue = not done, with a due date before today. Pulled out of the other sections.
+  const overdueItems=[...allTasks,...allReminders].filter(it=>!it.done&&it.dueDate&&it.dueDate<tdy)
+    .sort((a,b)=>a.dueDate<b.dueDate?-1:a.dueDate>b.dueDate?1:0);
+  const overdueIds=new Set(overdueItems.map(i=>i.id));
+  const activeTasks=allTasks.filter(t=>!t.done);
+  const priTasks=priorityIds.map(id=>activeTasks.find(t=>t.id===id)).filter(Boolean).filter(t=>!overdueIds.has(t.id));
+  const normalGroups=projects.map(p=>({...p,masterTasks:p.tasks.filter(t=>!t.done&&!priorityIds.includes(t.id)&&!overdueIds.has(t.id))})).filter(p=>p.masterTasks.length>0);
+  const flaggedReminders=allReminders.filter(r=>r.flagged&&!r.done&&!overdueIds.has(r.id));
+  const completedItems=[...allTasks.filter(t=>t.archived),...allReminders.filter(r=>r.archived),...allEvents.filter(e=>e.archived)].sort((a,b)=>(b.completedAt||0)-(a.completedAt||0));
+
+  // MasterItem defined as top-level component above MasterPanel
+
+  if(collapsed)return html`
+    <div style=${{width:28,flexShrink:0,borderRight:'1px solid #EAE4DC',background:'#FAFAF8',position:'relative'}}>
+      <button onClick=${onToggleCollapse} style=${{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%) rotate(90deg)',background:'none',border:'none',color:'#9A9088',fontSize:10,cursor:'pointer',whiteSpace:'nowrap',letterSpacing:'0.5px'}}>MASTER ▸</button>
+    </div>`;
+
+  return html`
+    <div style=${{width:'25%',minWidth:200,maxWidth:300,flexShrink:0,borderRight:'1px solid #EAE4DC',background:'#FAFAF8',display:'flex',flexDirection:'column'}}>
+      <div style=${{padding:'14px 14px 10px',borderBottom:'1px solid #EAE4DC',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+        <span style=${{fontFamily:"'DM Serif Display',serif",fontSize:15,fontWeight:400}}>Master List</span>
+        <button onClick=${onToggleCollapse} style=${{background:'none',border:'none',color:'#C0B8B0',fontSize:12,cursor:'pointer'}}>◁</button>
+      </div>
+      <div style=${{flex:1,overflowY:'auto',padding:'8px 0 20px'}}>
+        ${overdueItems.length>0&&html`<div style=${{marginBottom:8}}>
+          <div style=${{padding:'5px 14px 2px',fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#C7493A',fontWeight:600}}>⚠ Overdue (${overdueItems.length})</div>
+          ${overdueItems.map(it=>html`<div key=${it.id} style=${{borderLeft:'3px solid #C7493A',marginBottom:1,background:'rgba(199,73,58,0.05)'}}>
+            <${MasterItem} item=${it} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>
+          </div>`)}
+        </div>`}
+        ${priTasks.length>0&&html`<div style=${{marginBottom:8}}>
+          <div style=${{padding:'5px 14px 2px',fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:PRIORITY_COLOR,fontWeight:600}}>★ Priority</div>
+          ${priTasks.map(task=>html`
+            <div key=${task.id} draggable onDragStart=${e=>{priDragId.current=task.id;e.dataTransfer.effectAllowed='move';}} onDragOver=${e=>{e.preventDefault();setPriDragOver(task.id);}} onDrop=${e=>{e.preventDefault();setPriDragOver(null);if(priDragId.current&&priDragId.current!==task.id)onReorderPriority(priDragId.current,task.id);priDragId.current=null;}}
+              style=${{borderLeft:`3px solid ${PRIORITY_COLOR}`,marginBottom:1,cursor:'grab',background:priDragOver===task.id?'rgba(212,117,138,0.07)':'rgba(212,117,138,0.03)'}}>
+              <${MasterItem} item=${task} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>
+            </div>`)}
+        </div>`}
+        ${flaggedReminders.length>0&&html`<div style=${{marginBottom:8}}>
+          <div style=${{padding:'5px 14px 2px',fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:REMINDER_COLOR,fontWeight:600}}>⚑ Reminders</div>
+          ${flaggedReminders.map(r=>html`<div key=${r.id} style=${{borderLeft:`3px solid ${REMINDER_COLOR}`,marginBottom:1,background:'rgba(91,143,191,0.03)'}}><${MasterItem} item=${r} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/></div>`)}
+        </div>`}
+        ${normalGroups.map(p=>html`<div key=${p.id} style=${{marginBottom:10}}>
+          <div style=${{display:'flex',alignItems:'center',gap:6,padding:'5px 14px 2px'}}>
+            <div style=${{width:6,height:6,borderRadius:'50%',background:p.color,flexShrink:0}}/>
+            <span style=${{fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.7px',color:'#9A9088'}}>${p.name}</span>
+          </div>
+          ${p.masterTasks.map(task=>html`<${MasterItem} key=${task.id} item=${{...task,kind:'task',projectId:p.id,projectName:p.name,projectColor:p.color}} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>`)}
+        </div>`)}
+        ${allTasks.length===0&&flaggedReminders.length===0&&completedItems.length===0&&html`
+          <div style=${{padding:'28px 14px',color:'#C0B8B0',fontSize:12,textAlign:'center',lineHeight:1.8,fontStyle:'italic'}}>All tasks appear here automatically.<br/>Tap ☆ to mark priority.<br/>Flag ⚑ reminders to surface them here.</div>`}
+        ${completedItems.length>0&&html`<div style=${{marginTop:8,borderTop:'1px solid #EAE4DC'}}>
+          <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 14px 4px'}}>
+            <button onClick=${onToggleCompleted} style=${{background:'none',border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:6,color:'#9A9088',fontSize:10,fontWeight:600,letterSpacing:'0.8px',textTransform:'uppercase',padding:0}}>
+              <svg width="8" height="8" viewBox="0 0 8 8" fill="none" style=${{transform:completedExpanded?'rotate(90deg)':'rotate(0deg)',transition:'transform 0.2s',flexShrink:0}}>
+                <path d="M2 1.5L5.5 4L2 6.5" stroke="#9A9088" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              Completed (${completedItems.length})
+            </button>
+            ${completedExpanded&&html`<button onClick=${()=>setConfirmEmpty(true)} style=${{background:'none',border:'none',cursor:'pointer',fontSize:11,color:'#C0B8B0',textDecoration:'underline',textUnderlineOffset:2,padding:0}}>Empty</button>`}
+          </div>
+          ${completedExpanded&&completedItems.map(item=>html`<${MasterItem} key=${item.id} item=${item} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>`)}
+        </div>`}
+      </div>
+      ${confirmEmpty&&html`<${ConfirmDialog} message="This will permanently delete all completed tasks and reminders from all projects." confirmLabel="Empty" onConfirm=${()=>{setConfirmEmpty(false);onEmptyCompleted();}} onCancel=${()=>setConfirmEmpty(false)}/>`}
+    </div>`;
+};
+
+/* ── Calendar helpers ──────────────────────────────────────── */
+const CalIcon = () => html`
+  <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style=${{flexShrink:0}}>
+    <rect x="1" y="2.5" width="11" height="9.5" rx="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
+    <line x1="1" y1="5.5" x2="12" y2="5.5" stroke="currentColor" stroke-width="1.2"/>
+    <line x1="4" y1="1" x2="4" y2="4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+    <line x1="9" y1="1" x2="9" y2="4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+  </svg>`;
+
+const DAY_NAMES=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+function getWeekDates(weeks=1){
+  const now=new Date();
+  const dow=now.getDay();
+  const sunday=new Date(now);
+  sunday.setDate(now.getDate()-dow);
+  return Array.from({length:7*weeks},(_,i)=>{
+    const d=new Date(sunday);d.setDate(sunday.getDate()+i);return d;
+  });
+}
+const MONTH_ABBR=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const fmtRange=dates=>{
+  if(!dates.length)return'';
+  const a=dates[0],b=dates[dates.length-1];
+  return `${MONTH_ABBR[a.getMonth()]} ${a.getDate()} – ${MONTH_ABBR[b.getMonth()]} ${b.getDate()}`;
+};
+/* Absolute-date scheduling helpers. dueDate is stored as 'YYYY-MM-DD' so items
+   are pinned to a real calendar date and auto-surface when that date enters
+   the visible 1–4 week window. */
+const pad2=n=>String(n).padStart(2,'0');
+const toISO=d=>`${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+const todayISO=()=>toISO(new Date());
+const isoToMDY=iso=>{ if(!iso)return''; const [y,m,d]=iso.split('-'); return `${m}/${d}/${y.slice(2)}`; };
+const isoToLong=iso=>{ if(!iso)return''; const [y,m,d]=iso.split('-').map(Number); const dt=new Date(y,m-1,d); return `${DAY_NAMES[dt.getDay()]} ${MONTH_ABBR[m-1]} ${d}, ${y}`; };
+const parseMDY=str=>{
+  const m=String(str).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
+  if(!m)return null;
+  let mo=+m[1],da=+m[2],yr=+m[3];
+  if(yr<100)yr+=2000;
+  if(mo<1||mo>12||da<1||da>31)return null;
+  const d=new Date(yr,mo-1,da);
+  if(d.getMonth()!==mo-1||d.getDate()!==da)return null;
+  return toISO(d);
+};
+// When no year is given, use this year — but roll to next year if the date already passed.
+const rollYear=(mo,da)=>{
+  const now=new Date();
+  const todayD=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  let yr=now.getFullYear();
+  if(new Date(yr,mo-1,da)<todayD)yr+=1;
+  return yr;
+};
+// Flexible: 'm/d', 'm/d/yy', or bare digits — '6126'→6/1/26, '625'→Jun 25 (this/next yr).
+// Month is 2 digits only when it starts 0/1 and forms 1–12, else 1.
+const parseFlexDate=str=>{
+  if(!str)return null;
+  const s=String(str).trim();
+  const sl=s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2}|\d{4}))?$/);
+  if(sl){
+    const mo=+sl[1],da=+sl[2];
+    if(mo<1||mo>12||da<1||da>31)return null;
+    const yr=sl[3]!==undefined?(+sl[3]<100?+sl[3]+2000:+sl[3]):rollYear(mo,da);
+    const d=new Date(yr,mo-1,da);
+    if(d.getMonth()!==mo-1||d.getDate()!==da)return null;
+    return toISO(d);
+  }
+  if(s.includes('/'))return null;
+  const ds=s.replace(/\D/g,'');
+  if(ds.length<3||ds.length>8)return null;
+  let mo,i;
+  if((ds[0]==='0'||ds[0]==='1')&&ds.length>=2&&+ds.slice(0,2)>=1&&+ds.slice(0,2)<=12){mo=+ds.slice(0,2);i=2;}
+  else{mo=+ds[0];i=1;}
+  const rest=ds.slice(i);
+  if(!rest.length)return null;
+  const tryDay=dl=>{
+    if(rest.length<dl)return null;
+    const dd=+rest.slice(0,dl);
+    if(dd<1||dd>31)return null;
+    const ys=rest.slice(dl);
+    if(ys.length!==0&&ys.length!==2&&ys.length!==4)return null;
+    const yr=ys.length?(+ys<100?+ys+2000:+ys):rollYear(mo,dd);
+    return{da:dd,yr};
+  };
+  const r=rest[0]<='3'?(tryDay(2)||tryDay(1)):(tryDay(1)||tryDay(2));
+  if(!r||mo<1||mo>12)return null;
+  const d=new Date(r.yr,mo-1,r.da);
+  if(d.getMonth()!==mo-1||d.getDate()!==r.da)return null;
+  return toISO(d);
+};
+const isoToShort=iso=>{ if(!iso)return''; const [y,m,d]=iso.split('-').map(Number); const cy=new Date().getFullYear(); return `${MONTH_ABBR[m-1]} ${d}${y!==cy?` '${String(y).slice(2)}`:''}`; };
+// Pull a trailing "@<date>" off quick-add text, e.g. "Call vendor @6126" → due 6/1/26.
+const extractDue=text=>{
+  const m=String(text).match(/\s*@\s*([0-9][0-9/]{1,9})\s*$/);
+  if(m){ const iso=parseFlexDate(m[1]); if(iso) return {text:text.slice(0,m.index).trim(), due:iso}; }
+  return {text:String(text).trim(), due:null};
+};
+
+function fmtTime(t){
+  if(!t)return'';
+  const h=t.h,m=t.m,ap=t.ampm;
+  return `${h}:${String(m).padStart(2,'0')}${ap}`;
+}
+
+function timeSortVal(t){
+  if(!t)return Infinity;
+  let h=t.h;
+  if(t.ampm==='am'&&h===12)h=0;
+  if(t.ampm==='pm'&&h!==12)h+=12;
+  return h*60+t.m;
+}
+
+/* ── Day/Time Picker Popover ───────────────────────────────── */
+/* ── Time math helpers ─────────────────────────────────────── */
+function addMinutes(t,mins){
+  // t = {h,m,ampm}, mins = integer
+  let totalMins=((t.ampm==='pm'&&t.h!==12?t.h+12:t.ampm==='am'&&t.h===12?0:t.h)*60)+t.m+mins;
+  totalMins=((totalMins%1440)+1440)%1440;
+  const h24=Math.floor(totalMins/60),m=totalMins%60;
+  const ampm=h24<12?'am':'pm';
+  const h=h24===0?12:h24>12?h24-12:h24;
+  return{h,m,ampm};
+}
+
+function TimeSelector({label,time,onChange}){
+  const hours=[12,1,2,3,4,5,6,7,8,9,10,11];
+  const minutes=[0,15,30,45];
+  const ss={border:'1px solid #E0D8D0',borderRadius:6,padding:'4px 6px',fontSize:12,color:'#2A2825',background:'white',cursor:'pointer'};
+  const btnBase={border:'none',borderRadius:0,cursor:'pointer',fontSize:11,fontWeight:500,padding:'4px 10px',textAlign:'center'};
+  return html`<div>
+    ${label&&html`<div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',marginBottom:6,fontWeight:600}}>${label}</div>`}
+    <div style=${{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+      <select value=${time.h} onChange=${e=>onChange({...time,h:Number(e.target.value)})} style=${ss}>
+        ${hours.map(h=>html`<option key=${h} value=${h}>${h}</option>`)}
+      </select>
+      <select value=${time.m} onChange=${e=>onChange({...time,m:Number(e.target.value)})} style=${ss}>
+        ${minutes.map(m=>html`<option key=${m} value=${m}>${String(m).padStart(2,'0')}</option>`)}
+      </select>
+      <div style=${{display:'flex',borderRadius:6,overflow:'hidden',border:'1px solid #E0D8D0'}}>
+        ${['am','pm'].map(ap=>html`<button key=${ap} onClick=${()=>onChange({...time,ampm:ap})}
+          style=${{...btnBase,background:time.ampm===ap?'#2A2825':'white',color:time.ampm===ap?'white':'#7A7068'}}>
+          ${ap}
+        </button>`)}
+      </div>
+    </div>
+  </div>`;
+}
+
+const DayTimePicker = ({task,onAssign,onClose,isEvent=false,weeks=1}) => {
+  const weekDates=getWeekDates(weeks);
+  const[due,setDue]=useState(task.dueDate||null); // 'YYYY-MM-DD' or null
+  const[dateText,setDateText]=useState(task.dueDate?isoToMDY(task.dueDate):'');
+  const[hasTime,setHasTime]=useState(!!task.taskTime);
+  const[startT,setStartT]=useState(task.taskTime??{h:9,m:0,ampm:'am'});
+  const[hasEnd,setHasEnd]=useState(!!task.endTime);
+  const[endT,setEndT]=useState(task.endTime??{h:10,m:0,ampm:'am'});
+  const ref=useRef(null);
+
+  useEffect(()=>{
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target))onClose();};
+    setTimeout(()=>document.addEventListener('mousedown',h),0);
+    return()=>document.removeEventListener('mousedown',h);
+  },[]);
+
+  const applyDuration=mins=>{
+    const end=addMinutes(startT,mins);
+    setEndT(end);setHasEnd(true);
+  };
+
+  const apply=()=>{
+    const time=hasTime?startT:null;
+    const end=hasTime&&hasEnd?endT:null;
+    onAssign(due,time,end);
+    onClose();
+  };
+  const clear=()=>{onAssign(null,null,null);onClose();};
+
+  const btnBase={border:'none',borderRadius:6,cursor:'pointer',fontSize:11,fontWeight:500,padding:'5px 0',textAlign:'center'};
+
+  return html`
+    <div ref=${ref} onClick=${e=>e.stopPropagation()}
+      style=${{position:'fixed',zIndex:3000,background:'white',borderRadius:12,padding:'14px',
+        boxShadow:'0 12px 40px rgba(0,0,0,0.18)',border:'1px solid rgba(0,0,0,0.07)',minWidth:290,maxHeight:'90vh',overflowY:'auto'}}>
+      <div style=${{display:'flex',alignItems:'baseline',justifyContent:'space-between',marginBottom:8}}>
+        <div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>Day</div>
+        ${weeks>1&&html`<div style=${{fontSize:10,color:'#B0A898'}}>${fmtRange(weekDates)}</div>`}
+      </div>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:4,marginBottom:4}}>
+        ${DAY_NAMES.map(n=>html`<div key=${n} style=${{fontSize:9,textAlign:'center',color:'#B0A898',fontWeight:600}}>${n}</div>`)}
+      </div>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:4,marginBottom:10}}>
+        ${weekDates.map((d,i)=>{
+          const iso=toISO(d);
+          const isSel=due===iso;
+          const isToday=iso===todayISO();
+          const firstOfMonth=d.getDate()===1;
+          return html`<div key=${i} onClick=${()=>{const ns=isSel?null:iso;setDue(ns);setDateText(ns?isoToMDY(ns):'');}}
+            style=${{...btnBase,padding:'6px 0',background:isSel?'#2A2825':isToday?'#F0EBE5':'#F7F5F2',
+              color:isSel?'white':isToday?'#2A2825':'#7A7068',
+              border:isToday&&!isSel?'1px solid #D8D0C8':'1px solid transparent'}}>
+            <div style=${{fontSize:12,fontWeight:600}}>${d.getDate()}</div>
+            ${(firstOfMonth||i===0)&&html`<div style=${{fontSize:8,opacity:0.7,marginTop:1}}>${MONTH_ABBR[d.getMonth()]}</div>`}
+          </div>`;
+        })}
+      </div>
+      <!-- Any future date — type mm/dd/yy; it auto-appears when it enters the window -->
+      <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+        <span style=${{fontSize:10,letterSpacing:'0.6px',textTransform:'uppercase',color:'#B0A898',fontWeight:600,flexShrink:0}}>Or date</span>
+        <input value=${dateText} placeholder="m/d/yy — or just 6126" inputmode="numeric"
+          onInput=${e=>{const v=e.target.value;setDateText(v);const iso=parseFlexDate(v);if(iso)setDue(iso);}}
+          onBlur=${()=>{if(due)setDateText(isoToMDY(due));}}
+          style=${{flex:1,minWidth:0,border:`1px solid ${dateText&&!parseFlexDate(dateText)?'#D9A39A':'#E0D8D0'}`,borderRadius:6,padding:'5px 8px',fontSize:12,color:'#2A2825',background:'#FAFAF8',outline:'none'}}/>
+      </div>
+      ${due&&!weekDates.some(d=>toISO(d)===due)&&html`
+        <div style=${{fontSize:11,color:'#5E5276',background:'#EEEAF6',borderRadius:7,padding:'7px 9px',marginBottom:12,lineHeight:1.45}}>
+          Scheduled for <strong>${isoToLong(due)}</strong> — it'll drop onto the calendar once that date falls within the next ${weeks} week${weeks>1?'s':''}.
+        </div>`}
+      ${due&&html`<div style=${{display:'flex',flexDirection:'column',gap:10}}>
+        <!-- Start time -->
+        <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+          <div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>Start time</div>
+          <button onClick=${()=>setHasTime(p=>!p)}
+            style=${{background:'none',border:'none',cursor:'pointer',fontSize:11,color:hasTime?'#2A2825':'#9A9088',textDecoration:'underline',textUnderlineOffset:2}}>
+            ${hasTime?'Remove':'Add time'}
+          </button>
+        </div>
+        ${hasTime&&html`<${TimeSelector} time=${startT} onChange=${setStartT}/>`}
+        <!-- End time (only when start time set) -->
+        ${hasTime&&html`<div>
+          <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}}>
+            <div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>End time</div>
+            <button onClick=${()=>setHasEnd(p=>!p)}
+              style=${{background:'none',border:'none',cursor:'pointer',fontSize:11,color:hasEnd?'#2A2825':'#9A9088',textDecoration:'underline',textUnderlineOffset:2}}>
+              ${hasEnd?'Remove':'Add end time'}
+            </button>
+          </div>
+          <!-- Duration quick buttons -->
+          <div style=${{display:'flex',gap:5,marginBottom:hasEnd?8:0,flexWrap:'wrap'}}>
+            ${[30,60,90,120].map(m=>html`<button key=${m} onClick=${()=>applyDuration(m)}
+              style=${{background:'#F0EBE5',border:'none',borderRadius:6,padding:'3px 8px',fontSize:11,cursor:'pointer',color:'#7A7068',fontWeight:500}}>
+              +${m}m
+            </button>`)}
+          </div>
+          ${hasEnd&&html`<${TimeSelector} time=${endT} onChange=${setEndT}/>`}
+        </div>`}
+      </div>`}
+      <div style=${{display:'flex',gap:8,marginTop:14,justifyContent:'space-between'}}>
+        <button onClick=${clear} style=${{background:'none',border:'none',cursor:'pointer',fontSize:11,color:'#C0B8B0',textDecoration:'underline',textUnderlineOffset:2,padding:0}}>Clear</button>
+        <div style=${{display:'flex',gap:6}}>
+          <button onClick=${onClose} style=${{background:'#F0EBE5',color:'#2A2825',border:'none',borderRadius:8,padding:'6px 14px',fontSize:12,cursor:'pointer',fontWeight:500}}>Cancel</button>
+          <button onClick=${apply} style=${{background:'#2A2825',color:'white',border:'none',borderRadius:8,padding:'6px 14px',fontSize:12,cursor:'pointer',fontWeight:500}}>Apply</button>
+        </div>
+      </div>
+    </div>`;
+};
+
+/* ── Week Calendar Strip ────────────────────────────────────── */
+const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssignDay,weeks=1,onSetWeeks}) => {
+  const weekDates=getWeekDates(weeks);
+  const today=new Date().getDay();
+  const[pickerTask,setPickerTask]=useState(null);
+  const[pickerPos,setPickerPos]=useState({top:0,left:0});
+  const openTaskPicker=(e,t)=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setPickerPos({top:Math.min(r.bottom+4,window.innerHeight-400),left:Math.max(4,Math.min(r.left,window.innerWidth-300))});setPickerTask(t);};
+
+  const allTasks=projects.flatMap(p=>
+    p.tasks.filter(t=>!t.done&&t.dueDate)
+      .map(t=>({...t,kind:'task',projectColor:p.color,projectId:p.id}))
+  );
+  const allReminders=projects.flatMap(p=>
+    (p.reminders||[]).filter(r=>!r.done&&r.dueDate)
+      .map(r=>({...r,kind:'reminder',projectColor:p.color,projectId:p.id}))
+  );
+  const allEvents=projects.flatMap(p=>
+    (p.events||[]).filter(e=>!e.done&&e.dueDate)
+      .map(e=>({...e,kind:'event',projectColor:p.color,projectId:p.id}))
+  );
+
+  const itemsForDay=iso=>{
+    const tasks=allTasks.filter(t=>t.dueDate===iso);
+    const reminders=allReminders.filter(r=>r.dueDate===iso);
+    const events=allEvents.filter(e=>e.dueDate===iso);
+    const eventsNoTime=events.filter(e=>!e.taskTime);
+    const timed=[...tasks.filter(t=>t.taskTime),...reminders.filter(r=>r.taskTime),...events.filter(e=>e.taskTime)]
+      .sort((a,b)=>timeSortVal(a.taskTime)-timeSortVal(b.taskTime));
+    const untimedTasks=[...tasks.filter(t=>!t.taskTime),...reminders.filter(r=>!r.taskTime)];
+    return{eventsNoTime,untimedTasks,timed};
+  };
+
+  const renderDayCell=(i,d)=>{
+    const isToday=toISO(d)===todayISO();
+    const{eventsNoTime,untimedTasks,timed}=itemsForDay(toISO(d));
+    const hasAny=eventsNoTime.length>0||untimedTasks.length>0||timed.length>0;
+    const col=i%7;
+    return html`
+      <div key=${i} style=${{borderRight:col<6?'1px solid #F0EBE5':'none',padding:'5px 5px',background:isToday?'#FAFAF8':'white',overflowY:'auto',minHeight:62,maxHeight:weeks>1?150:240}}>
+        <div style=${{marginBottom:5,textAlign:'center'}}>
+          <div style=${{fontSize:12,fontWeight:600,lineHeight:1,background:isToday?'#2A2825':'none',color:isToday?'white':'#9A9088',
+            borderRadius:'50%',width:20,height:20,display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto'}}>${d.getDate()}</div>
+        </div>
+        ${eventsNoTime.map(e=>html`
+          <div key=${e.id} style=${{background:e.important?PRIORITY_BG:'#F0EBE5',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${e.projectColor}`,cursor:'pointer'}} onClick=${ev=>openTaskPicker(ev,e)}>
+            <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${e.text}</div>
+          </div>`)}
+        ${untimedTasks.map(t=>html`
+          <div key=${t.id} style=${{background:(t.kind==='task'&&priorityIds.includes(t.id))?PRIORITY_BG:'#F7F5F2',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${t.projectColor}`,cursor:'pointer'}} onClick=${e=>openTaskPicker(e,t)}>
+            <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${t.text}</div>
+          </div>`)}
+        ${timed.length>0&&html`
+          <div style=${{borderTop:'1px solid #EAE4DC',marginTop:3,paddingTop:3}}>
+            ${timed.map(t=>html`
+              <div key=${t.id} style=${{background:t.kind==='event'?t.important?PRIORITY_BG:'#F0EBE5':t.kind==='task'&&priorityIds.includes(t.id)?PRIORITY_BG:'#EEF4FB',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${t.projectColor}`,cursor:'pointer'}} onClick=${e=>openTaskPicker(e,t)}>
+                <div style=${{fontSize:9,color:'#9A9088',marginBottom:1}}>${fmtTime(t.taskTime)}${t.endTime?'–'+fmtTime(t.endTime):''}</div>
+                <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${t.text}</div>
+              </div>`)}
+          </div>`}
+        ${!hasAny&&html`<div style=${{height:14}}></div>`}
+      </div>`;
+  };
+
+  if(calCollapsed)return html`
+    <div style=${{background:'white',borderBottom:'1px solid #EAE4DC',flexShrink:0,display:'flex',alignItems:'center',padding:'6px 20px',gap:10,cursor:'pointer'}} onClick=${onToggleCalendar}>
+      <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style=${{color:'#9A9088',flexShrink:0}}>
+        <rect x="1" y="2.5" width="11" height="9.5" rx="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
+        <line x1="1" y1="5.5" x2="12" y2="5.5" stroke="currentColor" stroke-width="1.2"/>
+        <line x1="4" y1="1" x2="4" y2="4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        <line x1="9" y1="1" x2="9" y2="4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+      </svg>
+      <span style=${{fontSize:11,color:'#9A9088',fontWeight:500,letterSpacing:'0.3px'}}>Week Calendar</span>
+      <svg width="10" height="10" viewBox="0 0 8 8" fill="none" style=${{marginLeft:'auto',color:'#B0A898'}}>
+        <path d="M2 1.5L5.5 4L2 6.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>`;
+
+  return html`
+    <div style=${{background:'white',borderBottom:'1px solid #EAE4DC',flexShrink:0}}>
+      <!-- Header row -->
+      <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 20px 6px'}}>
+        <div style=${{display:'flex',alignItems:'center',gap:8}}>
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style=${{color:'#9A9088'}}>
+            <rect x="1" y="2.5" width="11" height="9.5" rx="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
+            <line x1="1" y1="5.5" x2="12" y2="5.5" stroke="currentColor" stroke-width="1.2"/>
+            <line x1="4" y1="1" x2="4" y2="4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            <line x1="9" y1="1" x2="9" y2="4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          <span style=${{fontFamily:"'DM Serif Display',serif",fontSize:14,color:'#2A2825'}}>${weeks===1?'This Week':fmtRange(weekDates)}</span>
+        </div>
+        <div style=${{display:'flex',alignItems:'center',gap:12}}>
+          <div style=${{display:'flex',alignItems:'center',gap:6}}>
+            <span style=${{fontSize:9.5,letterSpacing:'0.5px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>Weeks</span>
+            <div style=${{display:'flex',border:'1px solid #E0D8D0',borderRadius:6,overflow:'hidden'}}>
+              ${[1,2,3,4].map(n=>html`<button key=${n} onClick=${()=>onSetWeeks&&onSetWeeks(n)}
+                style=${{border:'none',borderLeft:n>1?'1px solid #E0D8D0':'none',background:weeks===n?'#2A2825':'white',
+                  color:weeks===n?'white':'#7A7068',fontSize:11,fontWeight:500,padding:'3px 8px',cursor:'pointer'}}>${n}</button>`)}
+            </div>
+          </div>
+          <button onClick=${onToggleCalendar}
+            style=${{background:'none',border:'none',cursor:'pointer',color:'#B0A898',fontSize:12,display:'flex',alignItems:'center',gap:4}}>
+            <svg width="10" height="10" viewBox="0 0 8 8" fill="none">
+              <path d="M6 1.5L2.5 4L6 6.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Collapse
+          </button>
+        </div>
+      </div>
+      <!-- Day-of-week header (shared across weeks) -->
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(7,1fr)',borderTop:'1px solid #F0EBE5',background:'#FCFBF9'}}>
+        ${DAY_NAMES.map((n,i)=>html`<div key=${n} style=${{textAlign:'center',padding:'4px 0',fontSize:9,letterSpacing:'0.5px',textTransform:'uppercase',color:i===today?'#2A2825':'#B0A898',fontWeight:600,borderRight:i<6?'1px solid #F0EBE5':'none'}}>${n}</div>`)}
+      </div>
+      <!-- One row per week -->
+      <div style=${{maxHeight:weeks>1?360:260,overflowY:'auto'}}>
+        ${Array.from({length:weeks}).map((_,w)=>html`
+          <div key=${w} style=${{display:'grid',gridTemplateColumns:'repeat(7,1fr)',borderTop:w>0?'1px solid #EAE4DC':'none',minHeight:80}}>
+            ${Array.from({length:7}).map((_,col)=>renderDayCell(w*7+col,weekDates[w*7+col]))}
+          </div>`)}
+      </div>
+    </div>`;
+};
+
+/* ── Print ─────────────────────────────────────────────────── */
+const buildPrintHTML = (projects,priorityIds,completedExpanded) => {
+  const allTasks=projects.flatMap(p=>p.tasks.map(t=>({...t,kind:'task',projectName:p.name,projectColor:p.color})));
+  const allReminders=projects.flatMap(p=>(p.reminders||[]).map(r=>({...r,kind:'reminder',projectName:p.name,projectColor:p.color})));
+  const priTasks=priorityIds.map(id=>allTasks.find(t=>t.id===id&&!t.done)).filter(Boolean);
+  const flaggedReminders=allReminders.filter(r=>r.flagged&&!r.done);
+  const normalGroups=projects.map(p=>({...p,masterTasks:p.tasks.filter(t=>!t.done&&!priorityIds.includes(t.id))})).filter(p=>p.masterTasks.length>0);
+  const completedItems=completedExpanded?[...allTasks.filter(t=>t.done),...allReminders.filter(r=>r.done&&r.flagged)]:[];
+  const css=`*{box-sizing:border-box;margin:0;padding:0}body{font-family:'DM Sans',sans-serif;color:#2A2825;padding:32pt;background:white}.hdr{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:24pt;border-bottom:1pt solid #E0D8D0;padding-bottom:10pt}h1{font-family:'DM Serif Display',serif;font-size:22pt}.date{font-size:9pt;color:#9A9088}.exit-btn,.print-btn{background:none;border:none;font-family:inherit;cursor:pointer;text-decoration:underline;padding:0}.exit-btn{font-size:11pt;color:#9A9088}.print-btn{display:block;margin-bottom:20pt;font-size:12pt;color:#2A2825;font-weight:600}.project{page-break-inside:avoid;margin-bottom:24pt;border:1pt solid #E0D8D0;border-radius:8pt;overflow:hidden}.ph{padding:10pt 14pt;font-family:'DM Serif Display',serif;font-size:13pt}.sec{padding:5pt 14pt 2pt;font-size:8pt;letter-spacing:1pt;text-transform:uppercase;color:#B0A898;font-weight:600;border-top:1pt solid #F0EBE5}.task{display:flex;align-items:center;gap:8pt;padding:5pt 14pt;font-size:10pt;border-top:1pt solid #F7F3EF}.dot{width:6pt;height:6pt;border-radius:50%;flex-shrink:0}.cb{width:10pt;height:10pt;border-radius:2pt;border:1.5pt solid #C8C0B8;flex-shrink:0}.cb.done{background:#2A2825;border-color:#2A2825}.done-text{text-decoration:line-through;color:#B0A898}.notes{display:flex;flex-wrap:wrap;gap:8pt;padding:10pt 14pt}.note{border-radius:4pt;padding:8pt 10pt;font-family:'Georgia','Times New Roman',serif;font-size:12pt;color:#3A3530;line-height:1.5;max-width:180pt}@media print{.exit-btn,.print-btn{display:none!important}}`;
+  const dot=c=>`<div class="dot" style="background:${c}"></div>`;
+  const masterSection=`<div class="project" style="page-break-after:always"><div class="ph" style="background:#F0EBE5">Master List</div>${priTasks.length?`<div class="sec" style="color:#D4758A;border-top:none">★ Priority</div>${priTasks.map(t=>`<div class="task"><div class="cb"></div>${dot(t.projectColor)}<span>${t.text}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${t.projectName}</span></div>`).join('')}` : ''}${flaggedReminders.length?`<div class="sec" style="color:#5B8FBF">⚑ Reminders</div>${flaggedReminders.map(r=>`<div class="task"><div class="cb"></div>${dot(r.projectColor)}<span>${r.text}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${r.projectName}</span></div>`).join('')}`:''}${normalGroups.map(p=>`<div class="sec">${p.name}</div>${p.masterTasks.map(t=>`<div class="task"><div class="cb"></div><span>${t.text}</span></div>`).join('')}`).join('')}${completedItems.length?`<div class="sec">Completed</div>${completedItems.map(i=>`<div class="task"><div class="cb done"></div>${dot(i.projectColor)}<span class="done-text">${i.text}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${i.projectName}</span></div>`).join('')}`:''}</div>`;
+  const projSections=projects.map(p=>`<div class="project"><div class="ph" style="background:${p.color};color:${isLight(p.color)?'#2A2825':'#fff'}">${p.name}</div>${p.tasks.length?`<div class="sec">Tasks</div>${p.tasks.map(t=>`<div class="task"><div class="cb${t.done?' done':''}"></div><span class="${t.done?'done-text':''}">${t.text}</span></div>`).join('')}`:''}${(p.reminders||[]).length?`<div class="sec">Reminders</div>${(p.reminders||[]).map(r=>`<div class="task"><div class="cb${r.done?' done':''}"></div><span class="${r.done?'done-text':''}">${r.text}</span>${r.flagged?` <span style="color:#5B8FBF">⚑</span>`:''}</div>`).join('')}`:''}${p.notes.length?`<div class="sec">Notes</div><div class="notes">${p.notes.map(n=>`<div class="note" style="background:${n.color}">${n.title?`<div style="font-family:'DM Serif Display',serif;font-size:13pt;margin-bottom:4pt">${n.title}</div>`:''}<div>${(n.text||'').replace(/\n/g,'<br/>')}</div>${(n.checklistItems||[]).map(it=>`<div style="margin-top:3pt;${it.done?'text-decoration:line-through;color:#9A9088':''}">• ${it.text}</div>`).join('')}</div>`).join('')}</div>`:''}  </div>`).join('');
+  return`<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Planner</title><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Serif+Display&family=Caveat:wght@400&display=swap" rel="stylesheet"/><style>${css}</style></head><body><div class="hdr"><div><h1>Planner</h1><div class="date">${new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div></div><button class="exit-btn" onclick="window.close()">← Exit print view</button></div><button class="print-btn" onclick="window.print()">Print / Save as PDF</button>${masterSection}${projSections}</body></html>`;
+};
+
+/* ── Brainy Insights ───────────────────────────────────────────
+   Milestone 1: hardcoded sample insights + a local quick-capture
+   extractor (heuristic, not AI). Milestone 2 replaces SAMPLE_INSIGHTS
+   and the extractor with a call to a Netlify Function /api/brainy
+   that runs Claude server-side (keys stay off the client).
+   The shape below is exactly what that endpoint will return, so the
+   sidebar UI does not change when the AI goes live.
+   type: 'action' -> task | 'followup'/'reminder' -> reminder | 'idea' */
+const SAMPLE_INSIGHTS = [
+  {id:uid(),type:'action',  text:'Send updated hemodynamic pricing sheet to Dr. Dwight Bailey', source:'Teams recap · Peds Team',          suggestProject:'Peds Team',                    suggestKind:'task'},
+  {id:uid(),type:'followup',text:'Awaiting Tableau access confirmation from Patrick',            source:'Voice note · Peds Team',           suggestProject:'Peds Team',                    suggestKind:'reminder'},
+  {id:uid(),type:'action',  text:'Confirm OR breakfast headcount & timing for 6/4',             source:'Voice note · Dell – Austin, TX',   suggestProject:'Dell – Austin, TX',            suggestKind:'event'},
+  {id:uid(),type:'reminder',text:'Touch base 6/1 to confirm Shriners site visit plans',          source:'Teams recap · Shriners',           suggestProject:'Shriners – Sacramento, CA',    suggestKind:'reminder'},
+  {id:uid(),type:'idea',    text:'Prep INVOS contract renewal talking points before Rady visit', source:'Note · Rady – San Diego, CA',       suggestProject:'Rady – San Diego, CA',         suggestKind:'task'},
+];
+
+const INSIGHT_STYLES = {
+  action:  {label:'To-do',      color:PRIORITY_COLOR, bg:PRIORITY_BG},
+  followup:{label:'Waiting on', color:REMINDER_COLOR, bg:REMINDER_BG},
+  reminder:{label:'Reminder',   color:REMINDER_COLOR, bg:REMINDER_BG},
+  idea:    {label:'Idea',       color:'#6FA08C',      bg:'#E8F3EE'},
+  summary: {label:'Summary',    color:'#7A6CA8',      bg:'#EEEAF6'},
+};
+
+const InsightCard = ({insight,projects,selectedProjectId,onSelectProject,important,onToggleImportant,text,onEditText,onAdd,onAddToNote,onDismiss}) => {
+  const st=INSIGHT_STYLES[insight.type]||INSIGHT_STYLES.action;
+  const kinds=[['task','+ Task'],['reminder','+ Reminder'],['event','+ Event'],['note','+ Note']];
+  const[noteMenuOpen,setNoteMenuOpen]=useState(false);
+  const autoH=el=>{if(el){el.style.height='auto';el.style.height=el.scrollHeight+'px';}};
+  const val=(text!==undefined&&text!==null)?text:insight.text;
+  const effText=()=>(val||'').trim();
+  const add=k=>{const t=effText();if(!t)return;onAdd({...insight,text:t},selectedProjectId,k,important);};
+  const proj=projects.find(p=>p.id===selectedProjectId);
+  const projNotes=proj?(proj.notes||[]):[];
+  const noteLabel=n=>(n.title&&n.title.trim())||((n.text||'').trim().split('\n')[0].slice(0,38))||'Untitled note';
+  const addToNote=id=>{const t=effText();if(t&&onAddToNote)onAddToNote({...insight,text:t},selectedProjectId,id);setNoteMenuOpen(false);};
+  const menuItem={width:'100%',textAlign:'left',display:'flex',alignItems:'center',background:'white',border:'1px solid #ECE6DE',borderRadius:6,padding:'6px 8px',fontSize:11.5,color:'#2A2825',cursor:'pointer',marginBottom:4};
+  return html`
+    <div style=${{background:'white',border:'1px solid #ECE6DE',borderRadius:12,padding:'11px 12px',marginBottom:10,boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
+      <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:7}}>
+        <span style=${{fontSize:9.5,fontWeight:700,letterSpacing:'0.6px',textTransform:'uppercase',color:st.color,background:st.bg,borderRadius:5,padding:'2px 7px'}}>${st.label}</span>
+        <button onClick=${()=>onDismiss(insight.id)} title="Dismiss" style=${{background:'none',border:'none',color:'#C0B8B0',fontSize:15,lineHeight:1,cursor:'pointer',padding:'0 2px'}}>×</button>
+      </div>
+      <textarea value=${val} onInput=${e=>{onEditText(insight.id,e.target.value);autoH(e.target);}}
+        ref=${el=>{if(el)autoH(el);}} placeholder="Edit suggestion…" rows=${1}
+        title="Edit the wording before adding it to your planner"
+        style=${{width:'100%',resize:'none',overflow:'hidden',border:'1px solid #ECE6DE',borderRadius:7,padding:'6px 8px',
+          fontFamily:'inherit',fontSize:13,color:'#2A2825',lineHeight:1.4,background:'#FCFBF9',outline:'none',marginBottom:6,display:'block'}}/>
+      <div style=${{fontSize:10.5,color:'#A8A096',marginBottom:extractDue(val).due?3:9}}>${insight.source}</div>
+      ${extractDue(val).due&&html`<div title="Due ${isoToLong(extractDue(val).due)}" style=${{fontSize:11,fontWeight:600,color:'#5B8FBF',marginBottom:9}}>Due ${isoToShort(extractDue(val).due)}</div>`}
+      <div style=${{display:'flex',gap:5,alignItems:'stretch',marginBottom:6}}>
+        <select value=${selectedProjectId} onChange=${e=>onSelectProject(insight.id,e.target.value)}
+          style=${{flex:1,minWidth:0,border:'1px solid #E0D8D0',borderRadius:7,padding:'5px 7px',fontSize:11.5,color:'#2A2825',background:'#FAFAF8',cursor:'pointer'}}>
+          ${projects.map(p=>html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+        </select>
+        <button onClick=${()=>onToggleImportant(insight.id)}
+          title=${important?'Important — will be marked when added':'Mark important before adding'}
+          style=${{flexShrink:0,width:30,border:important?`1px solid ${PRIORITY_COLOR}`:'1px solid #E0D8D0',
+            background:important?PRIORITY_BG:'white',color:important?PRIORITY_COLOR:'#B0A898',
+            borderRadius:7,fontSize:14,lineHeight:1,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>
+          ${important?'★':'☆'}
+        </button>
+      </div>
+      <div style=${{display:'flex',gap:4}}>
+        ${kinds.map(([k,label])=>{
+          const primary=k===insight.suggestKind;
+          const isNote=k==='note', activeNote=isNote&&noteMenuOpen;
+          return html`<button key=${k} onClick=${()=>isNote?setNoteMenuOpen(o=>!o):add(k)}
+            title=${isNote?'Choose new or existing note':''}
+            style=${{flex:1,minWidth:0,border:activeNote?'1px solid #2A2825':primary?'none':'1px solid #E0D8D0',
+              background:primary?'#2A2825':'white',color:primary?'#F4F1ED':'#7A7068',
+              borderRadius:7,padding:'5px 0',fontSize:10.5,fontWeight:500,cursor:'pointer',whiteSpace:'nowrap'}}>${label}</button>`;
+        })}
+      </div>
+      ${noteMenuOpen&&html`
+        <div style=${{marginTop:6,border:'1px solid #ECE6DE',borderRadius:8,background:'#FAFAF8',padding:'7px 8px'}}>
+          <button onClick=${()=>{add('note');setNoteMenuOpen(false);}} style=${menuItem}>
+            <span style=${{fontWeight:700,marginRight:7}}>＋</span>New note
+            ${important&&html`<span style=${{marginLeft:'auto',fontSize:9,fontWeight:700,color:'#9A7A00',background:'#FFF3BF',borderRadius:4,padding:'1px 5px'}}>YELLOW</span>`}
+          </button>
+          ${projNotes.length>0&&html`<div style=${{fontSize:9.5,letterSpacing:'0.5px',textTransform:'uppercase',color:'#B0A898',fontWeight:600,padding:'3px 2px 5px'}}>or append to</div>`}
+          ${projNotes.map(n=>html`<button key=${n.id} onClick=${()=>addToNote(n.id)} style=${menuItem}>
+            <span style=${{display:'inline-block',width:9,height:9,borderRadius:2,background:n.color,border:'1px solid rgba(0,0,0,0.12)',marginRight:7,flexShrink:0}}/>
+            <span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${noteLabel(n)}</span>
+          </button>`)}
+          <button onClick=${()=>setNoteMenuOpen(false)} style=${{background:'none',border:'none',color:'#9A9088',fontSize:11,cursor:'pointer',padding:'3px 2px 0',textDecoration:'underline'}}>Cancel</button>
+        </div>`}
+    </div>`;
+};
+
+const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,collapsed,onToggleCollapse}) => {
+  const[capture,setCapture]=useState('');
+  const[sel,setSel]=useState({}); // insightId -> projectId
+  const[imp,setImp]=useState({}); // insightId -> bool (mark important on add)
+  const[edits,setEdits]=useState({}); // insightId -> edited text
+  const[listening,setListening]=useState(false);
+  const[busy,setBusy]=useState(null); // null | status string
+  const[note,setNote]=useState(null); // transient info/error message
+  const recRef=useRef(null);
+  const fileRef=useRef(null);
+  const SR=typeof window!=='undefined'?(window.SpeechRecognition||window.webkitSpeechRecognition):null;
+  const projForInsight=ins=>{
+    if(sel[ins.id])return sel[ins.id];
+    const m=projects.find(p=>p.name===ins.suggestProject);
+    return m?m.id:(projects[0]&&projects[0].id);
+  };
+  const selectProject=(id,pid)=>setSel(s=>({...s,[id]:pid}));
+  const toggleImportant=id=>setImp(s=>({...s,[id]:!s[id]}));
+  const editText=(id,val)=>setEdits(s=>({...s,[id]:val}));
+  const textFor=ins=>edits[ins.id]!==undefined?edits[ins.id]:ins.text;
+  // Heuristic stand-ins (Phase 2: Claude returns a real summary + clean items).
+  const ABBR=/\b(Dr|Mr|Mrs|Ms|St|vs|etc|Inc|Co|Jr|Sr|Ave|Mt|approx|No)\.$/i;
+  const splitItems=raw=>raw.split(/\n+/).flatMap(line=>{
+    const t=line.trim(); if(!t)return [];
+    const parts=t.split(/(?<=[.!?;])\s+/);
+    const out=[]; let buf='';
+    parts.forEach(p=>{
+      buf=buf?buf+' '+p:p;
+      if(ABBR.test(buf.trim()))return; // false split on an abbreviation — keep building
+      out.push(buf.trim()); buf='';
+    });
+    if(buf.trim())out.push(buf.trim());
+    return out;
+  }).map(s=>s.replace(/^[\s\-*•\d.\)]+/,'').replace(/[.;]\s*$/,'').trim()).filter(s=>s.length>2);
+  const summarize=txt=>{
+    const words=txt.replace(/\s+/g,' ').trim().split(' ').filter(Boolean);
+    if(!words.length)return '';
+    return words.length>16?words.slice(0,16).join(' ')+'…':words.join(' ');
+  };
+  // Local heuristic fallback — used when the serverless Brain function isn't reachable.
+  const localExtract=raw=>{
+    const items=splitItems(raw); if(!items.length)return [];
+    const out=[];
+    const s=summarize(raw);
+    if(s)out.push({id:uid(),type:'summary',text:s,source:'Summary · on-device',suggestKind:'note'});
+    items.forEach(l=>out.push({id:uid(),type:'action',text:l,source:'Quick capture · on-device',suggestKind:'task'}));
+    return out;
+  };
+  // Map the /api/brainy response into insight cards.
+  const resultToInsights=r=>{
+    const out=[];
+    if(r.summary)out.push({id:uid(),type:'summary',text:r.summary,source:'Brain summary',suggestKind:'note'});
+    (r.actionItems||[]).forEach(t=>out.push({id:uid(),type:'action',text:t,source:'Mine to do · Brain',suggestKind:'task'}));
+    (r.followUps||[]).forEach(t=>out.push({id:uid(),type:'followup',text:t,source:'Waiting on · Brain',suggestKind:'reminder'}));
+    return out;
+  };
+  const extract=async()=>{
+    const raw=capture.trim(); if(!raw||busy)return;
+    setNote(null);setBusy('Analyzing…');
+    try{
+      const res=await fetch('/api/brainy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:raw})});
+      if(!res.ok)throw new Error('backend '+res.status);
+      const data=await res.json();
+      onCapture(resultToInsights(data));
+    }catch(e){
+      // No backend (e.g. opened locally) → use the on-device heuristic.
+      const local=localExtract(raw);
+      if(!local.length){setBusy(null);return;}
+      onCapture(local);
+    }
+    setBusy(null);setCapture('');
+  };
+  const toB64=file=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=rej;r.readAsDataURL(file);});
+  const onAudioFile=async(file)=>{
+    if(!file||busy)return;
+    setNote(null);setBusy('Transcribing…');
+    try{
+      const audio=await toB64(file);
+      const res=await fetch('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio,mime:file.type})});
+      if(!res.ok)throw new Error('transcribe '+res.status);
+      const {text}=await res.json();
+      setCapture(prev=>(prev?prev.trim()+' ':'')+text);
+    }catch(e){
+      setNote('Audio upload needs the deployed backend (Phase 2 function). Try Live listen instead.');
+    }
+    setBusy(null);
+  };
+  // Live listen — browser speech-to-text (Chrome/Edge), no API key needed.
+  const toggleListen=()=>{
+    if(!SR)return;
+    if(listening){try{recRef.current&&recRef.current.stop();}catch(e){}return;}
+    const rec=new SR();
+    rec.continuous=true;rec.interimResults=false;rec.lang='en-US';
+    rec.onresult=e=>{
+      let finalT='';
+      for(let i=e.resultIndex;i<e.results.length;i++){if(e.results[i].isFinal)finalT+=e.results[i][0].transcript;}
+      if(finalT.trim())setCapture(prev=>(prev?prev.trim()+' ':'')+finalT.trim());
+    };
+    rec.onerror=()=>setListening(false);
+    rec.onend=()=>{setListening(false);recRef.current=null;};
+    recRef.current=rec;
+    try{rec.start();setListening(true);}catch(e){setListening(false);}
+  };
+  useEffect(()=>()=>{try{recRef.current&&recRef.current.stop();}catch(e){}},[]);
+
+  if(collapsed)return html`
+    <div style=${{width:30,flexShrink:0,borderLeft:'1px solid #EAE4DC',background:'#FAFAF8',position:'relative'}}>
+      <button onClick=${onToggleCollapse} style=${{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%) rotate(90deg)',background:'none',border:'none',color:'#9A9088',fontSize:11,cursor:'pointer',whiteSpace:'nowrap',letterSpacing:'0.5px'}}>BRAIN ▸</button>
+    </div>`;
+
+  return html`
+    <div style=${{width:312,flexShrink:0,borderLeft:'1px solid #EAE4DC',background:'#F7F5F1',display:'flex',flexDirection:'column'}}>
+      <div style=${{padding:'13px 14px 11px',borderBottom:'1px solid #EAE4DC',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+        <div style=${{display:'flex',alignItems:'center',gap:7}}>
+          <div>
+            <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:15}}>Brain</div>
+            <div style=${{fontSize:10,color:'#A8A096',marginTop:1}}>${insights.length} suggestion${insights.length===1?'':'s'} for your planner</div>
+          </div>
+        </div>
+        <button onClick=${onToggleCollapse} title="Collapse" style=${{background:'none',border:'none',color:'#C0B8B0',fontSize:13,cursor:'pointer'}}>▷</button>
+      </div>
+
+      <div style=${{flex:1,overflowY:'auto',padding:'12px 13px 20px'}}>
+        <!-- Quick capture -->
+        <div style=${{background:'white',border:'1px solid #ECE6DE',borderRadius:12,padding:'11px 12px',marginBottom:14}}>
+          <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6,gap:6}}>
+            <span style=${{fontSize:11,fontWeight:600,color:'#7A7068',flexShrink:0}}>Quick capture</span>
+            <div style=${{display:'flex',alignItems:'center',gap:6}}>
+              <button onClick=${toggleListen} disabled=${!SR}
+                title=${SR?'Live transcribe from your microphone':'Live listen needs Chrome or Edge'}
+                style=${{display:'flex',alignItems:'center',gap:5,border:`1px solid ${listening?'#C7493A':'#E0D8D0'}`,
+                  background:listening?'#FCEEEC':'white',color:listening?'#C7493A':(SR?'#7A7068':'#C8C0B8'),
+                  borderRadius:14,padding:'3px 9px',fontSize:10.5,fontWeight:500,cursor:SR?'pointer':'not-allowed'}}>
+                <span class=${listening?'brain-rec-dot':''} style=${{width:7,height:7,borderRadius:'50%',background:listening?'#C7493A':'#9A9088',display:'inline-block',flexShrink:0}}/>
+                ${listening?'Listening… stop':'Live listen'}
+              </button>
+              <button onClick=${()=>fileRef.current&&fileRef.current.click()} title="Upload an audio file to transcribe (needs deployed backend)"
+                style=${{border:'1px solid #E0D8D0',background:'white',color:'#7A7068',borderRadius:14,padding:'3px 9px',fontSize:10.5,fontWeight:500,cursor:'pointer'}}>🎧 Upload</button>
+              <input ref=${fileRef} type="file" accept="audio/*" style=${{display:'none'}}
+                onChange=${e=>{const f=e.target.files&&e.target.files[0];if(f)onAudioFile(f);e.target.value='';}}/>
+            </div>
+          </div>
+          <textarea value=${capture} onInput=${e=>setCapture(e.target.value)}
+            placeholder="Paste a Teams recap, jot notes, or use Live listen — one idea per line…"
+            style=${{width:'100%',minHeight:64,resize:'vertical',border:'1px solid #E0D8D0',borderRadius:8,padding:'7px 9px',fontSize:12,color:'#2A2825',background:'#FAFAF8',outline:'none',lineHeight:1.4}}/>
+          <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:8,gap:8}}>
+            <span style=${{fontSize:9.5,color:'#B8B0A6',fontStyle:'italic'}}>${busy?busy:'Summary + to-dos · Brain AI when deployed'}</span>
+            <button onClick=${extract} disabled=${!capture.trim()||!!busy}
+              style=${{background:(capture.trim()&&!busy)?'#2A2825':'#D8D0C8',color:'#F4F1ED',border:'none',borderRadius:8,padding:'6px 12px',fontSize:11.5,fontWeight:500,cursor:(capture.trim()&&!busy)?'pointer':'default',whiteSpace:'nowrap'}}>${busy==='Analyzing…'?'Analyzing…':'Summarize + extract'}</button>
+          </div>
+          ${note&&html`<div style=${{marginTop:8,fontSize:10.5,color:'#9A7A6A',background:'#FBF3EE',border:'1px solid #EADBD0',borderRadius:7,padding:'6px 8px',lineHeight:1.4}}>${note}</div>`}
+        </div>
+
+        <div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',fontWeight:600,marginBottom:9,paddingLeft:2}}>Suggested for you</div>
+        ${insights.length===0
+          ?html`<div style=${{textAlign:'center',padding:'24px 12px',color:'#B8B0A6',fontSize:12,lineHeight:1.7}}>All caught up.<br/>Capture notes above and Brainy will surface to-dos here.</div>`
+          :insights.map(ins=>html`<${InsightCard} key=${ins.id} insight=${ins} projects=${projects}
+              selectedProjectId=${projForInsight(ins)} onSelectProject=${selectProject}
+              important=${!!imp[ins.id]} onToggleImportant=${toggleImportant}
+              text=${textFor(ins)} onEditText=${editText}
+              onAdd=${onAdd} onAddToNote=${onAddToNote} onDismiss=${onDismiss}/>`)}
+      </div>
+    </div>`;
+};
+
+/* ── Root App ──────────────────────────────────────────────── */
+/* ── Header overflow menu (Print / Export / Import) ────────── */
+const OverflowMenu = ({items}) => {
+  const[open,setOpen]=useState(false);
+  const ref=useRef(null);
+  useEffect(()=>{
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
+    document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h);
+  },[]);
+  return html`
+    <div ref=${ref} style=${{position:'relative',flexShrink:0}}>
+      <button onClick=${()=>setOpen(o=>!o)} title="More" aria-label="More options"
+        style=${{background:open?'#EFEAE3':'none',color:'#9A9088',border:'1px solid #D8D0C8',borderRadius:16,padding:'6px 13px',fontSize:15,lineHeight:1,cursor:'pointer'}}>⋯</button>
+      ${open&&html`<div style=${{position:'absolute',right:0,top:'calc(100% + 6px)',background:'white',borderRadius:10,boxShadow:'0 8px 28px rgba(0,0,0,0.16)',border:'1px solid rgba(0,0,0,0.06)',minWidth:150,zIndex:900,overflow:'hidden'}}>
+        ${items.map((it,i)=>html`<button key=${i} onClick=${()=>{setOpen(false);it.onClick();}}
+          style=${{width:'100%',padding:'10px 14px',background:'none',border:'none',borderTop:i>0?'1px solid #F0EBE5':'none',cursor:'pointer',textAlign:'left',fontSize:13,color:'#2A2825'}}>${it.label}</button>`)}
+      </div>`}
+    </div>`;
+};
+
+const App = () => {
+  const[state,setState]=useState(null);
+  const[loaded,setLoaded]=useState(false);
+  const[masterCollapsed,setMasterCollapsed]=useState(false);
+  const[expandedIds,setExpandedIds]=useState(new Set());
+  const[addingProject,setAddingProject]=useState(false);
+  const[newProjectName,setNewProjectName]=useState('');
+  const[openColorPickerId,setOpenColorPickerId]=useState(null);
+  const[calCollapsed,setCalCollapsed]=useState(false);
+  const[brainyCollapsed,setBrainyCollapsed]=useState(false);
+  const[insights,setInsights]=useState(SAMPLE_INSIGHTS);
+  const fileRef=useRef(null);
+  const debouncedSaveRef=useRef(debounce(saveState,1200));
+  const debouncedSave=debouncedSaveRef.current;
+
+  useEffect(()=>{
+    const saved=loadState();
+    if(saved){const s=purgeOldCompleted(saved);setState(s);setExpandedIds(new Set(s.projects?.map(p=>p.id)||[]));}
+    else{const s=makeSeed();setState(s);setExpandedIds(new Set(s.projects.map(p=>p.id)));}
+    setLoaded(true);
+  },[]);
+  useEffect(()=>{if(loaded&&state)debouncedSave(state);},[state,loaded]);
+
+  if(!loaded||!state)return html`<div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',color:'#B0A898',fontSize:14}}>Loading…</div>`;
+
+  const{projects,priorityIds=[],completedExpanded=false,weeksToShow=1}=state;
+  const upState=p=>setState(s=>({...s,...p}));
+  const setWeeks=n=>upState({weeksToShow:n});
+  const upProjects=p=>upState({projects:p});
+  const upProject=u=>upProjects(projects.map(p=>p.id===u.id?u:p));
+  const delProject=id=>{upProjects(projects.filter(p=>p.id!==id));setExpandedIds(prev=>{const n=new Set(prev);n.delete(id);return n;});};
+  const addProject=()=>{
+    if(!newProjectName.trim())return;
+    const color=PROJECT_COLORS[5+(projects.length%6)];
+    const np={id:uid(),name:newProjectName.trim(),color,tasks:[],reminders:[],events:[],notes:[]};
+    upProjects([...projects,np]);setExpandedIds(prev=>new Set([...prev,np.id]));
+    setNewProjectName('');setAddingProject(false);
+  };
+  const toggleExp=id=>setExpandedIds(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
+  const masterToggleDone=(pid,tid)=>upProjects(projects.map(p=>{if(p.id!==pid)return p;const tasks=p.tasks.map(t=>t.id===tid?{...t,done:!t.done,archived:false,completedAt:!t.done?Date.now():null}:t);return{...p,tasks:[...tasks.filter(t=>!t.done),...tasks.filter(t=>t.done)]};}));
+  const masterToggleReminderDone=(pid,rid)=>upProjects(projects.map(p=>{if(p.id!==pid)return p;const reminders=(p.reminders||[]).map(r=>r.id===rid?{...r,done:!r.done,archived:false,completedAt:!r.done?Date.now():null}:r);return{...p,reminders:[...reminders.filter(r=>!r.done),...reminders.filter(r=>r.done)]};}));
+  const masterToggleEventDone=(pid,eid)=>upProjects(projects.map(p=>{if(p.id!==pid)return p;const events=(p.events||[]).map(e=>e.id===eid?{...e,done:!e.done,archived:false,completedAt:!e.done?Date.now():null}:e);return{...p,events:[...events.filter(e=>!e.done),...events.filter(e=>e.done)]};}));
+  const togglePriority=tid=>{const a=priorityIds.includes(tid);upState({priorityIds:a?priorityIds.filter(x=>x!==tid):[...priorityIds,tid]});};
+  const reorderPriority=(fromId,toId)=>{const a=[...priorityIds];const fi=a.indexOf(fromId),ti=a.indexOf(toId);if(fi!==-1&&ti!==-1){[a[fi],a[ti]]=[a[ti],a[fi]];upState({priorityIds:a});}};
+  const emptyCompleted=()=>{setState(s=>{const projects=s.projects.map(p=>({...p,tasks:p.tasks.filter(t=>!t.archived),reminders:(p.reminders||[]).filter(r=>!r.archived),events:(p.events||[]).filter(e=>!e.archived)}));const liveIds=new Set(projects.flatMap(p=>p.tasks.map(t=>t.id)));return{...s,projects,priorityIds:s.priorityIds.filter(id=>liveIds.has(id))};});};
+  const assignDayToTask=(pid,tid,day,time,end)=>upProjects(projects.map(p=>p.id===pid?{...p,tasks:p.tasks.map(t=>t.id===tid?{...t,dueDate:day,taskTime:time,endTime:end}:t)}:p));
+  // Master-list assign: route to tasks OR reminders by which list the id belongs to.
+  const assignDayFromMaster=(pid,id,day,time,end)=>upProjects(projects.map(p=>{
+    if(p.id!==pid)return p;
+    if(p.tasks.some(t=>t.id===id))return{...p,tasks:p.tasks.map(t=>t.id===id?{...t,dueDate:day,taskTime:time,endTime:end}:t)};
+    if((p.reminders||[]).some(r=>r.id===id))return{...p,reminders:(p.reminders||[]).map(r=>r.id===id?{...r,dueDate:day,taskTime:time,endTime:end}:r)};
+    return p;
+  }));
+
+  /* ── Brainy → Planner bridge ──────────────────────────────────
+     This is the integration: a suggestion becomes a real planner
+     item (tagged fromBrainy) and immediately flows everywhere the
+     planner reads from state — master list, project strip, calendar. */
+  const addInsightToPlanner=(insight,projectId,kind,important=false)=>{
+    const newId=uid();
+    const {text:cleanText,due}=extractDue(insight.text); // honor a trailing @date
+    setState(s=>{
+      const projects=s.projects.map(p=>{
+        if(p.id!==projectId)return p;
+        if(kind==='note')return{...p,notes:[...p.notes,{id:newId,title:'',text:cleanText,color:important?'#FFF3BF':defaultNoteColor(p.color),gradientStep:null,checklistItems:[],collapsed:false,fromBrainy:true}]};
+        const base={id:newId,text:cleanText,done:false,fromBrainy:true};
+        if(kind==='reminder')return{...p,reminders:[...(p.reminders||[]),{...base,flagged:important,dueDate:due,taskTime:null,endTime:null}]};
+        if(kind==='event')return{...p,events:[...(p.events||[]),{...base,important,dueDate:due,taskTime:null,endTime:null}]};
+        return{...p,tasks:[...p.tasks,due?{...base,dueDate:due}:base]};
+      });
+      // Tasks express "important" via the priority list.
+      const priorityIds=(kind==='task'&&important)?[...(s.priorityIds||[]),newId]:s.priorityIds;
+      return{...s,projects,priorityIds};
+    });
+    if(!expandedIds.has(projectId))setExpandedIds(prev=>new Set([...prev,projectId]));
+    setInsights(prev=>prev.filter(i=>i.id!==insight.id));
+  };
+  const addInsightToExistingNote=(insight,projectId,noteId)=>{
+    setState(s=>({...s,projects:s.projects.map(p=>{
+      if(p.id!==projectId)return p;
+      return{...p,notes:p.notes.map(n=>{
+        if(n.id!==noteId)return n;
+        const add=extractDue(insight.text).text;
+        const sep=(n.text&&n.text.trim())?'\n':'';
+        return{...n,text:(n.text||'')+sep+add};
+      })};
+    })}));
+    if(!expandedIds.has(projectId))setExpandedIds(prev=>new Set([...prev,projectId]));
+    setInsights(prev=>prev.filter(i=>i.id!==insight.id));
+  };
+  const dismissInsight=id=>setInsights(prev=>prev.filter(i=>i.id!==id));
+  const addCapturedInsights=items=>setInsights(prev=>[...items,...prev]);
+  // Global sweep: archive every checked (done, not-yet-archived) item across all projects.
+  const pendingAllCount=projects.flatMap(p=>[...p.tasks,...(p.reminders||[]),...(p.events||[])]).filter(it=>it.done&&!it.archived).length;
+  const completeAll=()=>{
+    const stamp=Date.now();
+    const arch=it=>(it.done&&!it.archived)?{...it,archived:true,completedAt:stamp}:it;
+    upProjects(projects.map(p=>({...p,tasks:p.tasks.map(arch),reminders:(p.reminders||[]).map(arch),events:(p.events||[]).map(arch)})));
+  };
+
+  return html`
+    <div style=${{height:'100%',display:'flex',flexDirection:'column',background:'#F4F1ED'}}>
+      <header style=${{padding:'12px 22px',display:'flex',alignItems:'center',justifyContent:'space-between',borderBottom:'1px solid #EAE4DC',background:'#F4F1ED',flexShrink:0,zIndex:30,gap:10}}>
+        <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:21,letterSpacing:'-0.3px',flexShrink:0}}>Planner</div>
+        <div style=${{display:'flex',gap:6,flexWrap:'wrap',justifyContent:'flex-end'}}>
+          <button onClick=${()=>setAddingProject(true)} style=${{background:'#2A2825',color:'#F4F1ED',border:'none',borderRadius:16,padding:'6px 14px',fontSize:12,fontWeight:500,cursor:'pointer'}}>+ Project</button>
+          ${pendingAllCount>0&&html`<button onClick=${completeAll}
+            title="Archive all completed items across every project to Master Completed"
+            style=${{display:'flex',alignItems:'center',gap:5,background:'none',color:'#5E7A5E',border:'1px solid #BBD0BB',borderRadius:16,padding:'6px 12px',fontSize:12,fontWeight:500,cursor:'pointer'}}>
+            <svg width="11" height="9" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Complete all (${pendingAllCount})
+          </button>`}
+          <${OverflowMenu} items=${[
+            {label:'Print',onClick:()=>{const h=buildPrintHTML(projects,priorityIds,completedExpanded);const w=window.open('','_blank');w.document.write(h);w.document.close();}},
+            {label:'Export',onClick:()=>exportBackup(state)},
+            {label:'Import',onClick:()=>fileRef.current?.click()},
+          ]}/>
+          <input ref=${fileRef} type="file" accept=".json" style=${{display:'none'}} onChange=${e=>{const f=e.target.files?.[0];if(f)importBackup(f,s=>{setState(s);setExpandedIds(new Set(s.projects?.map(p=>p.id)||[]));});e.target.value='';}}/>
+        </div>
+      </header>
+      <div style=${{flex:1,display:'flex',overflow:'hidden'}}>
+        <${MasterPanel} projects=${projects} priorityIds=${priorityIds}
+          onToggleDone=${masterToggleDone} onTogglePriority=${togglePriority}
+          onToggleReminderDone=${masterToggleReminderDone} onToggleEventDone=${masterToggleEventDone}
+          onReorderPriority=${reorderPriority} onEmptyCompleted=${emptyCompleted}
+          completedExpanded=${completedExpanded}
+          onToggleCompleted=${()=>upState({completedExpanded:!completedExpanded})}
+          onAssignDay=${assignDayFromMaster} weeks=${weeksToShow}
+          collapsed=${masterCollapsed} onToggleCollapse=${()=>setMasterCollapsed(p=>!p)}/>
+        <div style=${{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+          <${WeekCalendar} projects=${projects} priorityIds=${priorityIds} weeks=${weeksToShow} onSetWeeks=${setWeeks}
+            calCollapsed=${calCollapsed} onToggleCalendar=${()=>setCalCollapsed(p=>!p)}
+            onAssignDay=${(tid,day,time,end,kind)=>{
+              if(kind==='event'){
+                const proj=projects.find(p=>(p.events||[]).some(e=>e.id===tid));
+                if(proj)upProjects(projects.map(p=>p.id===proj.id?{...p,events:(p.events||[]).map(e=>e.id===tid?{...e,dueDate:day,taskTime:time,endTime:end}:e)}:p));
+              } else if(kind==='reminder'){
+                const proj=projects.find(p=>(p.reminders||[]).some(r=>r.id===tid));
+                if(proj)upProjects(projects.map(p=>p.id===proj.id?{...p,reminders:(p.reminders||[]).map(r=>r.id===tid?{...r,dueDate:day,taskTime:time,endTime:end}:r)}:p));
+              } else {
+                const proj=projects.find(p=>p.tasks.some(t=>t.id===tid));
+                if(proj)assignDayToTask(proj.id,tid,day,time,end);
+              }
+            }}/>
+          <div style=${{flex:1,overflowY:'auto',overflowX:'hidden',padding:'16px 20px 40px'}}>
+          ${addingProject&&html`<div style=${{background:'white',borderRadius:14,padding:'11px 15px',display:'flex',gap:10,alignItems:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.07)',border:'1.5px solid #2A2825',marginBottom:12}}>
+            <input autoFocus value=${newProjectName} onInput=${e=>setNewProjectName(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addProject();if(e.key==='Escape'){setAddingProject(false);setNewProjectName('');}}} placeholder="Project name…" style=${{flex:1,border:'none',outline:'none',fontSize:14,background:'none',color:'#2A2825'}}/>
+            <button onClick=${addProject} style=${{background:'#2A2825',color:'white',border:'none',borderRadius:7,padding:'5px 12px',fontSize:12,cursor:'pointer'}}>Add</button>
+            <button onClick=${()=>{setAddingProject(false);setNewProjectName('');}} style=${{background:'none',border:'none',color:'#9A9088',fontSize:18,lineHeight:1,cursor:'pointer'}}>×</button>
+          </div>`}
+          ${projects.length===0&&!addingProject&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#B0A898',fontSize:13}}><div style=${{fontSize:26,marginBottom:12,opacity:0.4}}>▤</div>No projects yet — add one above.</div>`}
+          <${DraggableProjects} projects=${projects} onReorder=${upProjects}
+            renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow}/>`}/>
+          </div>
+        </div>
+        <${BrainySidebar} insights=${insights} projects=${projects}
+          onAdd=${addInsightToPlanner} onAddToNote=${addInsightToExistingNote} onDismiss=${dismissInsight} onCapture=${addCapturedInsights}
+          collapsed=${brainyCollapsed} onToggleCollapse=${()=>setBrainyCollapsed(p=>!p)}/>
+      </div>
+    </div>`;
+};
+
+render(html`<${App}/>`, document.getElementById('root'));
+</script>
+</body>
+</html>

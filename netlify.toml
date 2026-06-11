@@ -1,0 +1,12 @@
+# Netlify config for the unified Planner + Brain app.
+# index.html is served as the site; the serverless functions hold the API keys.
+
+[build]
+  publish = "."
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+# /api/brainy and /api/transcribe routes are declared via `export const config`
+# inside each function file (Netlify Functions v2), so no redirects are needed here.
