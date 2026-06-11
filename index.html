@@ -1586,15 +1586,18 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
   const toB64=file=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=rej;r.readAsDataURL(file);});
   const onAudioFile=async(file)=>{
     if(!file||busy)return;
-    setNote(null);setBusy('Transcribing…');
+    setNote(null);
+    if(file.size>4*1024*1024){setNote(`That clip is ${(file.size/1048576).toFixed(1)} MB. The upload function caps near 6 MB — record a shorter clip or use Live listen.`);return;}
+    setBusy('Transcribing…');
     try{
       const audio=await toB64(file);
-      const res=await fetch('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio,mime:file.type})});
-      if(!res.ok)throw new Error('transcribe '+res.status);
+      const res=await fetch('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio,mime:file.type,name:file.name})});
+      if(!res.ok){let msg='Transcription failed ('+res.status+').';try{const d=await res.json();if(d&&d.error)msg=d.error;}catch(_){}throw new Error(msg);}
       const {text}=await res.json();
       setCapture(prev=>(prev?prev.trim()+' ':'')+text);
     }catch(e){
-      setNote('Audio upload needs the deployed backend (Phase 2 function). Try Live listen instead.');
+      const m=e&&e.message?e.message:'';
+      setNote(m&&!/fetch/i.test(m)?m:'Could not reach the transcription function (expected when running locally — try Live listen).');
     }
     setBusy(null);
   };
