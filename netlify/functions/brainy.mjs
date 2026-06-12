@@ -11,7 +11,8 @@ You receive raw text: either a transcribed voice note or a pasted meeting recap 
 Definitions:
 - actionItems: tasks the USER must personally complete.
 - followUps: things waiting on someone ELSE, or to check back on.
-- Never put the same task in both lists. Only extract what the text actually supports — do not invent tasks. Empty arrays are fine.
+- Never put the same task in both lists, and do not mirror an action as a follow-up: if an actionItem and a followUp describe the SAME underlying thing (same deliverable, person, or meeting), keep only ONE — prefer the actionItem. When unsure which list, pick one, never both.
+- Only extract what the text actually supports — do not invent tasks. Empty arrays are fine.
 
 Phrasing (CRITICAL — keep every item SHORT): write each item as terse shorthand, a fragment someone thumb-types into a to-do list, NEVER a sentence. Hard rules:
 - Aim for 3-5 words; 6 is the absolute max. If it reads like a sentence, cut it down.
@@ -30,8 +31,8 @@ Consolidation rules (critical):
 - Aim for the fewest items that cover all distinct commitments — quality over quantity.
 
 Ordering rules:
-- Sort actionItems in logical order of execution: prerequisites first.
-- Sort followUps by expected timeframe: things to check soon first.
+- Group related items next to each other: cluster by account/site, person, or topic so related to-dos sit together (e.g. keep all "Dr. Bailey" items in a row, all "Rady" items in a row).
+- Within a group put prerequisites first; otherwise order actionItems by execution order, and followUps by how soon to check back.
 
 Also produce:
 - summary: a 1-2 sentence summary of the note.`;
