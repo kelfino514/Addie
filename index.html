@@ -103,10 +103,16 @@ const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYm
 const isLocalhost=['localhost','127.0.0.1','::1','[::1]',''].includes(location.hostname);
 const syncEnabled=!!(SUPABASE_URL&&SUPABASE_ANON_KEY)&&!isLocalhost;
 
-const SKEY='unified-v1', TSKEY='unified-v1:ts';
-const saveLocal=(s,ts)=>{try{localStorage.setItem(SKEY,JSON.stringify(s));if(ts)localStorage.setItem(TSKEY,ts);}catch(e){}};
+/* The cache belongs to ONE account: every write stamps the signed-in user's
+   id, and boot/sign-out wipe it on any mismatch. Without that, a different
+   account signing in on this device would see — and sync up — the previous
+   account's planner. ('' = local-only mode, which never signs in.) */
+const SKEY='unified-v1', TSKEY='unified-v1:ts', OKEY='unified-v1:owner';
+const saveLocal=(s,ts)=>{try{localStorage.setItem(SKEY,JSON.stringify(s));if(ts)localStorage.setItem(TSKEY,ts);localStorage.setItem(OKEY,_syncUserId||'');}catch(e){}};
 const loadLocal=()=>{try{const r=localStorage.getItem(SKEY);if(r)return JSON.parse(r);}catch(e){}return null;};
 const loadLocalTs=()=>{try{return localStorage.getItem(TSKEY);}catch(e){return null;}};
+const localOwner=()=>{try{return localStorage.getItem(OKEY)||'';}catch(e){return '';}};
+const clearLocal=()=>{try{localStorage.removeItem(SKEY);localStorage.removeItem(TSKEY);localStorage.removeItem(OKEY);}catch(e){}};
 
 // Per-device UI prefs (panel widths). Kept local and NOT synced — layout
 // preference is device-specific (wide monitor vs phone).
@@ -2145,6 +2151,10 @@ const App = () => {
   const bootSynced=async userId=>{
     _syncUserId=userId;
     try{
+      // The cache on this device may belong to a DIFFERENT account (or to no
+      // account — pre-owner-tag builds). Wipe it on mismatch so it can never
+      // render for, or be uploaded to, the account signing in now.
+      if(localOwner()!==userId)clearLocal();
       const local=loadLocal(),localTs=loadLocalTs();
       let row=null,reachable=false;
       try{row=await withTimeout(pullRemote(userId),8000);reachable=true;}catch(e){}
@@ -2157,7 +2167,11 @@ const App = () => {
       }else if(local){
         chosen=local;chosenTs=localTs||new Date().toISOString();try{await withTimeout(pushRemote(userId,local,chosenTs),8000);}catch(e){}
       }else{
-        chosen=makeSeed();chosenTs=new Date().toISOString();try{await withTimeout(pushRemote(userId,chosen,chosenTs),8000);}catch(e){}
+        // Nothing local, nothing remote: blank planner. Only push (and only
+        // timestamp) the seed when the server actually answered — an offline
+        // boot must not mint a fresh ts that could later beat the real row.
+        chosen=makeSeed();chosenTs=reachable?new Date().toISOString():null;
+        if(reachable){try{await withTimeout(pushRemote(userId,chosen,chosenTs),8000);}catch(e){}}
       }
       const s=purgeOldCompleted(chosen);
       saveLocal(s,chosenTs);
@@ -2203,6 +2217,7 @@ const App = () => {
       })();
     }else if(!session&&bootedRef.current){ // signed out — tear down, back to the gate
       bootedRef.current=false;_syncUserId=null;
+      clearLocal(); // don't leave this account's planner readable on a shared device
       if(channelRef.current){getSupa().then(s=>{try{s.removeChannel(channelRef.current);}catch(e){}channelRef.current=null;});}
       setLoaded(false);setState(null);setSyncStatus('connecting');
     }
