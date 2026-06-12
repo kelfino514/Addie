@@ -138,6 +138,10 @@ const subscribeRemote=async(userId,onRemote)=>{
     .subscribe();
 };
 
+// Reject a promise if it doesn't settle in time — so a hung network request
+// can never freeze sign-in boot on "Loading…".
+const withTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),ms))]);
+
 /* The persistence seam the app calls. Always writes the local cache, and
    (when signed in) pushes the same blob to Supabase with a matching
    timestamp. Both are debounced together by the caller. */
@@ -1928,14 +1932,23 @@ const AuthGate = () => {
 
 /* Registers a passkey on the current device for the signed-in user. Shown in
    the header so the user can opt in per device / ecosystem. */
+const PASSKEY_FLAG='passkey-added';
 const AddPasskeyButton = () => {
-  const[st,setSt]=useState(''); // '' | 'busy' | 'done' | 'err'
+  // Remember success per device so reopening doesn't re-prompt (re-registering
+  // on an authenticator that already has one throws InvalidStateError).
+  const[st,setSt]=useState(()=>{try{return localStorage.getItem(PASSKEY_FLAG)?'done':'';}catch(e){return '';}});
+  const markDone=()=>{try{localStorage.setItem(PASSKEY_FLAG,'1');}catch(e){}setSt('done');};
   const add=async()=>{
     setSt('busy');
-    try{const{error}=await registerPasskey();if(error)throw error;setSt('done');}
-    catch(ex){setSt('err');}
+    try{const{error}=await registerPasskey();if(error)throw error;markDone();}
+    catch(ex){
+      const m=(((ex&&ex.name)||'')+' '+((ex&&ex.message)||'')).toLowerCase();
+      // "already exists on this authenticator" → treat as done, not an error.
+      if(m.includes('invalidstate')||m.includes('already')||m.includes('exclude'))markDone();
+      else setSt('err');
+    }
   };
-  if(st==='done')return html`<span style=${{fontSize:12,color:'#5E9E5E',whiteSpace:'nowrap'}}>✓ Passkey added</span>`;
+  if(st==='done')return html`<span style=${{fontSize:12,color:'#5E9E5E',whiteSpace:'nowrap'}} title="A passkey is set up on this device">✓ Passkey on</span>`;
   return html`<button onClick=${add} disabled=${st==='busy'}
     title="Register a passkey on this device for faster sign-in next time"
     style=${{background:'none',border:'1px solid #E0D8D0',borderRadius:16,padding:'6px 12px',fontSize:12,color:st==='err'?'#A0291E':'#7A7068',cursor:st==='busy'?'default':'pointer',whiteSpace:'nowrap'}}>
@@ -1960,6 +1973,8 @@ const App = () => {
   const debouncedSaveRef=useRef(debounce(saveState,1200));
   const debouncedSave=debouncedSaveRef.current;
   const skipSave=useRef(false); // suppress the save-echo when state arrives FROM the server
+  const channelRef=useRef(null);
+  const bootedRef=useRef(false);
 
   // Seed the app from a state blob (local cache or server). Expands every project.
   const bootState=saved=>{
@@ -1975,54 +1990,74 @@ const App = () => {
     setState(s);
     setExpandedIds(prev=>{const n=new Set(prev);(s.projects||[]).forEach(p=>{if(!prev.has(p.id))n.add(p.id);});return n;});
   };
-
-  useEffect(()=>{
-    if(!syncEnabled){bootState(loadLocal());return;}
-    let channel=null,authSub=null,started=false;
-    // First sign-in or returning: reconcile local cache vs server (newer wins),
-    // migrate local up if the server has nothing yet, then subscribe to changes.
-    const bootSynced=async userId=>{
-      _syncUserId=userId;
+  // First sign-in or returning: reconcile local cache vs server (newer wins),
+  // migrate local up if the server has nothing yet. Hardened so it ALWAYS ends
+  // with setLoaded(true) — the app must never get stuck on "Loading…".
+  const bootSynced=async userId=>{
+    _syncUserId=userId;
+    try{
       const local=loadLocal(),localTs=loadLocalTs();
-      let row=null;try{row=await pullRemote(userId);}catch(e){setSyncStatus('connecting');}
+      let row=null,reachable=false;
+      try{row=await withTimeout(pullRemote(userId),8000);reachable=true;}catch(e){}
       const hasRemote=row&&row.data&&Object.keys(row.data).length;
       let chosen,chosenTs;
       if(hasRemote&&local&&localTs&&row.updated_at&&new Date(localTs).getTime()>new Date(row.updated_at).getTime()){
-        chosen=local;chosenTs=localTs;try{await pushRemote(userId,local,localTs);}catch(e){}
+        chosen=local;chosenTs=localTs;try{await withTimeout(pushRemote(userId,local,localTs),8000);}catch(e){}
       }else if(hasRemote){
         chosen=row.data;chosenTs=row.updated_at;
       }else if(local){
-        chosen=local;chosenTs=localTs||new Date().toISOString();try{await pushRemote(userId,local,chosenTs);}catch(e){}
+        chosen=local;chosenTs=localTs||new Date().toISOString();try{await withTimeout(pushRemote(userId,local,chosenTs),8000);}catch(e){}
       }else{
-        chosen=makeSeed();chosenTs=new Date().toISOString();try{await pushRemote(userId,chosen,chosenTs);}catch(e){}
+        chosen=makeSeed();chosenTs=new Date().toISOString();try{await withTimeout(pushRemote(userId,chosen,chosenTs),8000);}catch(e){}
       }
       const s=purgeOldCompleted(chosen);
       saveLocal(s,chosenTs);
       skipSave.current=true; // we already pushed during boot — don't re-push on first render
       setState(s);
       setExpandedIds(new Set(s.projects?.map(p=>p.id)||[]));
+      setSyncStatus(reachable?'synced':'connecting');
+    }catch(e){
+      bootState(loadLocal()); // last-ditch: render from local so we never hang
+    }finally{
       setLoaded(true);
-      setSyncStatus('synced');
-      try{channel=await subscribeRemote(userId,adoptRemote);}catch(e){}
-    };
+    }
+  };
+
+  // Auth wiring: ONLY mirror session state here. Never await another Supabase
+  // call inside onAuthStateChange — it runs while GoTrue holds its lock, so a
+  // PostgREST/auth call would deadlock (the stuck-on-Loading bug). Boot happens
+  // in the effect below, reacting to `session`, outside the lock.
+  useEffect(()=>{
+    if(!syncEnabled){bootState(loadLocal());return;}
+    let authSub=null,cancelled=false;
     (async()=>{
       const supa=await getSupa();
-      const{data:{subscription}}=supa.auth.onAuthStateChange(async(_e,sess)=>{
-        setSession(sess);setAuthReady(true);
-        if(sess&&!started){started=true;await bootSynced(sess.user.id);}
-        else if(!sess&&started){ // signed out — drop back to the gate
-          started=false;_syncUserId=null;
-          if(channel){try{supa.removeChannel(channel);}catch(e){}channel=null;}
-          setLoaded(false);setState(null);setSyncStatus('connecting');
-        }
+      const{data:{subscription}}=supa.auth.onAuthStateChange((_e,sess)=>{
+        if(!cancelled){setSession(sess);setAuthReady(true);}
       });
       authSub=subscription;
       const{data:{session:sess}}=await supa.auth.getSession();
-      setSession(sess);setAuthReady(true);
-      if(sess&&!started){started=true;await bootSynced(sess.user.id);}
+      if(!cancelled){setSession(sess);setAuthReady(true);}
     })();
-    return ()=>{try{authSub?.unsubscribe();}catch(e){}};
+    return ()=>{cancelled=true;try{authSub?.unsubscribe();}catch(e){}};
   },[]);
+
+  // Boot + realtime react to the session — runs OUTSIDE the auth callback.
+  useEffect(()=>{
+    if(!syncEnabled)return;
+    if(session&&!bootedRef.current){
+      bootedRef.current=true;
+      const uid=session.user.id;
+      (async()=>{
+        await bootSynced(uid);
+        try{channelRef.current=await subscribeRemote(uid,adoptRemote);}catch(e){}
+      })();
+    }else if(!session&&bootedRef.current){ // signed out — tear down, back to the gate
+      bootedRef.current=false;_syncUserId=null;
+      if(channelRef.current){getSupa().then(s=>{try{s.removeChannel(channelRef.current);}catch(e){}channelRef.current=null;});}
+      setLoaded(false);setState(null);setSyncStatus('connecting');
+    }
+  },[session]);
 
   // Persist on every change — but skip the render that came FROM the server.
   useEffect(()=>{
