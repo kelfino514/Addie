@@ -85,9 +85,13 @@ const ICON_SLOT={width:20,height:20,flexShrink:0}; // empty placeholder to keep 
    The anon key is a PUBLIC key — safe to ship in the client; Row Level
    Security scopes every row to its signed-in owner. Leave both blank to
    run local-only (no sign-in). */
-const SUPABASE_URL='';
-const SUPABASE_ANON_KEY='';
-const syncEnabled=!!(SUPABASE_URL&&SUPABASE_ANON_KEY);
+const SUPABASE_URL='https://qykyltsgxfechhfnxrbq.supabase.co';
+const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF5a3lsdHNneGZlY2hoZm54cmJxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEyMTk0MDgsImV4cCI6MjA5Njc5NTQwOH0.7sI2e-oTjMaz2Ca8E4hUlfvUX5E8G_xceGgkp7neM80';
+// Live auth/sync is bound to the deployed origin (passkey Relying-Party ID
+// and the magic-link redirect), so stay local-only on localhost — local dev
+// keeps working unauthenticated and we verify the gate/sync on the live site.
+const isLocalhost=['localhost','127.0.0.1','::1','[::1]',''].includes(location.hostname);
+const syncEnabled=!!(SUPABASE_URL&&SUPABASE_ANON_KEY)&&!isLocalhost;
 
 const SKEY='unified-v1', TSKEY='unified-v1:ts';
 const saveLocal=(s,ts)=>{try{localStorage.setItem(SKEY,JSON.stringify(s));if(ts)localStorage.setItem(TSKEY,ts);}catch(e){}};
@@ -100,13 +104,20 @@ const WRITER_ID=uid()+uid();   // unique per tab — lets us ignore our own real
 let _syncUserId=null;          // set once signed in; gates remote writes
 let _supaP=null;
 const getSupa=()=>{
-  if(!_supaP)_supaP=import('https://esm.sh/@supabase/supabase-js@2.45.0')
-    .then(({createClient})=>createClient(SUPABASE_URL,SUPABASE_ANON_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,flowType:'implicit'}}));
+  // v2.105+ for passkeys; experimental.passkey opts the client into the WebAuthn API.
+  if(!_supaP)_supaP=import('https://esm.sh/@supabase/supabase-js@2.105.0')
+    .then(({createClient})=>createClient(SUPABASE_URL,SUPABASE_ANON_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,flowType:'implicit',experimental:{passkey:true}}}));
   return _supaP;
 };
-// Passwordless email magic link. The default (free-tier) email template
-// renders a link, so we use the link flow — clicking it lands back here
-// already signed in (detectSessionInUrl). flowType:'implicit' keeps the
+// Passkey (WebAuthn) — the preferred path. signInWithPasskey runs the
+// discoverable-credential ceremony (Face ID / Touch ID / Windows Hello) with
+// no email needed. registerPasskey adds a passkey to the CURRENT signed-in
+// user, so it requires a prior session — the email link below bootstraps that.
+const signInWithPasskey=()=>getSupa().then(s=>s.auth.signInWithPasskey());
+const registerPasskey=()=>getSupa().then(s=>s.auth.registerPasskey());
+// Passwordless email magic link — bootstrap (first sign-in, before any passkey
+// exists) and fallback. The free-tier template renders a link; clicking it
+// lands back here signed in (detectSessionInUrl). flowType:'implicit' keeps the
 // token self-contained so it works whichever browser/mail-app opens it.
 const sendMagicLink=email=>getSupa().then(s=>s.auth.signInWithOtp({email,options:{shouldCreateUser:true,emailRedirectTo:window.location.origin}}));
 const signOutSync=()=>getSupa().then(s=>s.auth.signOut());
@@ -1864,42 +1875,71 @@ const OverflowMenu = ({items}) => {
 };
 
 /* ── Auth Gate ─────────────────────────────────────────────────
-   Passwordless email magic-link sign-in. Rendered only when sync is
-   configured and there's no session yet. Enter email → click the link
-   in the email on this device → it lands back here signed in
-   (detectSessionInUrl handles the redirect). */
+   Passkey-first sign-in, with the email magic link as bootstrap + fallback.
+   Rendered only when sync is configured and there's no session yet.
+   - Passkey: signInWithPasskey runs the WebAuthn ceremony (no email needed);
+     works once a passkey exists on this device / synced via the OS keychain.
+   - Email link: needed the first time (to create the account so a passkey
+     can be added from inside the app) and whenever a passkey isn't available. */
 const AuthGate = () => {
+  const[view,setView]=useState('home'); // 'home' | 'email' | 'sent'
   const[email,setEmail]=useState('');
-  const[step,setStep]=useState('email'); // 'email' | 'sent'
-  const[busy,setBusy]=useState(false);
+  const[busy,setBusy]=useState('');     // '' | 'passkey' | 'email'
   const[err,setErr]=useState('');
   const INPUT={width:'100%',border:'1.5px solid #E0D8D0',borderRadius:9,padding:'11px 13px',fontSize:14,outline:'none',color:'#2A2825',background:'#FCFBF9',marginBottom:12,display:'block'};
-  const BTN=b=>({width:'100%',background:b?'#8A8078':'#2A2825',color:'#F4F1ED',border:'none',borderRadius:9,padding:'11px',fontSize:14,fontWeight:500,cursor:b?'default':'pointer'});
-  const send=async()=>{
+  const BTN=(b,solid=true)=>({width:'100%',background:b?'#8A8078':solid?'#2A2825':'white',color:solid?'#F4F1ED':'#2A2825',border:solid?'none':'1.5px solid #D8D0C8',borderRadius:9,padding:'11px',fontSize:14,fontWeight:500,cursor:b?'default':'pointer'});
+  const LINK={background:'none',border:'none',color:'#9A9088',fontSize:12,cursor:'pointer',marginTop:14,textDecoration:'underline'};
+  const doPasskey=async()=>{
+    setBusy('passkey');setErr('');
+    try{const{error}=await signInWithPasskey();if(error)throw error;/* onAuthStateChange takes over */}
+    catch(ex){setErr('No passkey was used. If this is a new device, sign in with an email link first, then add a passkey from inside the app.');setBusy('');}
+  };
+  const doEmail=async()=>{
     const e=email.trim();
     if(!e){setErr('Enter your email.');return;}
-    setBusy(true);setErr('');
-    try{const{error}=await sendMagicLink(e);if(error)throw error;setStep('sent');}
+    setBusy('email');setErr('');
+    try{const{error}=await sendMagicLink(e);if(error)throw error;setView('sent');}
     catch(ex){setErr(ex?.message||'Could not send the link.');}
-    finally{setBusy(false);}
+    finally{setBusy('');}
   };
   return html`
     <div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',background:'#F4F1ED',padding:20}}>
       <div style=${{background:'white',borderRadius:16,padding:'30px 30px 26px',width:'min(380px,92vw)',boxShadow:'0 16px 48px rgba(0,0,0,0.12)'}}>
         <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:24,marginBottom:6}}>Planner</div>
-        ${step==='email'?html`
+        ${view==='home'?html`
           <div style=${{fontSize:13,color:'#7A7068',marginBottom:22,lineHeight:1.5}}>Sign in to sync your planner across devices.</div>
-          <input type="email" autoFocus value=${email} onInput=${e=>setEmail(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')send();}}
+          <button onClick=${doPasskey} disabled=${!!busy} style=${BTN(busy==='passkey')}>${busy==='passkey'?'Waiting for passkey…':'🔑  Sign in with a passkey'}</button>
+          <button onClick=${()=>{setView('email');setErr('');}} disabled=${!!busy} style=${{...BTN(false,false),marginTop:10}}>Use an email link instead</button>
+        `:view==='email'?html`
+          <div style=${{fontSize:13,color:'#7A7068',marginBottom:18,lineHeight:1.5}}>We'll email you a one-time sign-in link.</div>
+          <input type="email" autoFocus value=${email} onInput=${e=>setEmail(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')doEmail();}}
             placeholder="you@email.com" style=${INPUT}/>
-          <button onClick=${send} disabled=${busy} style=${BTN(busy)}>${busy?'Sending…':'Email me a sign-in link'}</button>
+          <button onClick=${doEmail} disabled=${!!busy} style=${BTN(busy==='email')}>${busy==='email'?'Sending…':'Email me a sign-in link'}</button>
+          <button onClick=${()=>{setView('home');setErr('');}} style=${LINK}>← Back</button>
         `:html`
-          <div style=${{fontSize:13,color:'#7A7068',marginBottom:18,lineHeight:1.55}}>Check your inbox — we emailed a sign-in link to <b>${email.trim()}</b>. Open it <b>on this device</b> to finish signing in.</div>
-          <button onClick=${send} disabled=${busy} style=${BTN(busy)}>${busy?'Sending…':'Resend link'}</button>
-          <button onClick=${()=>{setStep('email');setErr('');}} style=${{background:'none',border:'none',color:'#9A9088',fontSize:12,cursor:'pointer',marginTop:12,textDecoration:'underline'}}>Use a different email</button>
+          <div style=${{fontSize:13,color:'#7A7068',marginBottom:18,lineHeight:1.55}}>Check your inbox — we emailed a sign-in link to <b>${email.trim()}</b>. Open it <b>on this device</b> to finish signing in, then add a passkey for next time.</div>
+          <button onClick=${doEmail} disabled=${!!busy} style=${BTN(busy==='email')}>${busy==='email'?'Sending…':'Resend link'}</button>
+          <button onClick=${()=>{setView('email');setErr('');}} style=${LINK}>Use a different email</button>
         `}
         ${err&&html`<div style=${{color:'#A0291E',fontSize:12,marginTop:12,lineHeight:1.4}}>${err}</div>`}
       </div>
     </div>`;
+};
+
+/* Registers a passkey on the current device for the signed-in user. Shown in
+   the header so the user can opt in per device / ecosystem. */
+const AddPasskeyButton = () => {
+  const[st,setSt]=useState(''); // '' | 'busy' | 'done' | 'err'
+  const add=async()=>{
+    setSt('busy');
+    try{const{error}=await registerPasskey();if(error)throw error;setSt('done');}
+    catch(ex){setSt('err');}
+  };
+  if(st==='done')return html`<span style=${{fontSize:12,color:'#5E9E5E',whiteSpace:'nowrap'}}>✓ Passkey added</span>`;
+  return html`<button onClick=${add} disabled=${st==='busy'}
+    title="Register a passkey on this device for faster sign-in next time"
+    style=${{background:'none',border:'1px solid #E0D8D0',borderRadius:16,padding:'6px 12px',fontSize:12,color:st==='err'?'#A0291E':'#7A7068',cursor:st==='busy'?'default':'pointer',whiteSpace:'nowrap'}}>
+    ${st==='busy'?'Adding…':st==='err'?'Retry passkey':'＋ Add passkey'}</button>`;
 };
 
 const App = () => {
@@ -2092,6 +2132,7 @@ const App = () => {
           <input ref=${fileRef} type="file" accept=".json" style=${{display:'none'}} onChange=${e=>{const f=e.target.files?.[0];if(f)importBackup(f,s=>{setState(s);setExpandedIds(new Set(s.projects?.map(p=>p.id)||[]));});e.target.value='';}}/>
           ${syncEnabled&&session&&html`<div style=${{display:'flex',alignItems:'center',gap:7,marginLeft:2}}>
             <span title=${syncStatus==='synced'?'Synced across devices':'Connecting…'} style=${{width:8,height:8,borderRadius:'50%',background:syncStatus==='synced'?'#5E9E5E':'#C9A227',flexShrink:0}}/>
+            <${AddPasskeyButton}/>
             <button onClick=${()=>signOutSync()} title=${'Signed in as '+(session.user?.email||'')+' — sign out'}
               style=${{background:'none',border:'1px solid #E0D8D0',borderRadius:16,padding:'6px 12px',fontSize:12,color:'#7A7068',cursor:'pointer'}}>Sign out</button>
           </div>`}
