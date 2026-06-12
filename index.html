@@ -1747,7 +1747,9 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
           </button>
           <button onClick=${()=>fref.current&&fref.current.click()} title="Upload an audio file to transcribe (needs deployed backend)"
             style=${{border:'1px solid #E0D8D0',background:'white',color:'#7A7068',borderRadius:14,padding:'3px 9px',fontSize:10.5,fontWeight:500,cursor:'pointer'}}>🎧 Upload</button>
-          <input ref=${fref} type="file" accept="audio/*" style=${{display:'none'}}
+          <!-- Explicit extensions alongside audio/* so iOS Files doesn't gray out
+               .m4a (Voice Memos) — audio/* alone is unreliable on iOS. -->
+          <input ref=${fref} type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.m4b,.caf,.aiff,.mp4,.mpeg,.mpga,.webm,.ogg,.oga,.flac" style=${{display:'none'}}
             onChange=${e=>{const f=e.target.files&&e.target.files[0];if(f)onAudioFile(f);e.target.value='';}}/>
         </div>
       </div>
