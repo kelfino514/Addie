@@ -1747,27 +1747,34 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
     }
     setBusy(null);setCapture('');
   };
-  const onAudioFile=async(file)=>{
-    if(!file||busy)return;
+  // Transcribe a single file to text (chunking long recordings).
+  const transcribeFile=async(file)=>{
+    if(file.size<=TX_DIRECT_MAX)return await transcribeBlob(file,file.name);
+    const mono=await decodeToMono(file);
+    const chunkSamples=TX_CHUNK_SECONDS*TX_SAMPLE_RATE;
+    const total=Math.max(1,Math.ceil(mono.length/chunkSamples));
+    const chunks=Array.from({length:total},(_,i)=>encodeWav(mono.slice(i*chunkSamples,(i+1)*chunkSamples),TX_SAMPLE_RATE));
+    const parts=await Promise.all(chunks.map((wav,i)=>transcribeBlob(wav,`chunk${i}.wav`)));
+    const text=parts.filter(Boolean).join(' ').trim();
+    if(!text)throw new Error('No speech detected in the recording.');
+    return text;
+  };
+  // Batch: transcribe one or many files in sequence, appending each transcript
+  // so a day's worth of short voice memos can be extracted together.
+  const onAudioFiles=async(files)=>{
+    const list=[...files].filter(Boolean);
+    if(!list.length||busy)return;
     setNote(null);
+    const n=list.length;
     try{
-      let text;
-      if(file.size<=TX_DIRECT_MAX){
-        setBusy('Transcribing…');
-        text=await transcribeBlob(file,file.name);
-      } else {
-        // Long recording: decode in-browser, split into ~2-min chunks, transcribe in parallel.
-        setBusy('Preparing audio…');
-        const mono=await decodeToMono(file);
-        const chunkSamples=TX_CHUNK_SECONDS*TX_SAMPLE_RATE;
-        const total=Math.max(1,Math.ceil(mono.length/chunkSamples));
-        setBusy(`Transcribing ${total} chunk${total>1?'s':''}…`);
-        const chunks=Array.from({length:total},(_,i)=>encodeWav(mono.slice(i*chunkSamples,(i+1)*chunkSamples),TX_SAMPLE_RATE));
-        const parts=await Promise.all(chunks.map((wav,i)=>transcribeBlob(wav,`chunk${i}.wav`)));
-        text=parts.filter(Boolean).join(' ').trim();
-        if(!text)throw new Error('No speech detected in the recording.');
+      const all=[];
+      for(let i=0;i<n;i++){
+        setBusy(n>1?`Transcribing ${i+1} of ${n}…`:'Transcribing…');
+        const text=await transcribeFile(list[i]);
+        if(text&&text.trim())all.push(text.trim());
       }
-      setCapture(prev=>(prev?prev.trim()+' ':'')+text);
+      const joined=all.join('\n\n');
+      if(joined)setCapture(prev=>(prev?prev.trim()+'\n\n':'')+joined);
     }catch(e){
       const m=e&&e.message?e.message:'';
       setNote(m&&!/fetch/i.test(m)?m:'Could not reach the transcription function (expected when running locally — try Live listen).');
@@ -1810,12 +1817,12 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
             <span class=${listening?'brain-rec-dot':''} style=${{width:7,height:7,borderRadius:'50%',background:listening?'#C7493A':'#9A9088',display:'inline-block',flexShrink:0}}/>
             ${listening?'Listening… stop':'Live listen'}
           </button>
-          <button onClick=${()=>fref.current&&fref.current.click()} title="Upload an audio file to transcribe (needs deployed backend)"
-            style=${{border:'1px solid #E0D8D0',background:'white',color:'#7A7068',borderRadius:14,padding:'3px 9px',fontSize:10.5,fontWeight:500,cursor:'pointer'}}>🎧 Upload</button>
+          <button onClick=${()=>fref.current&&fref.current.click()} title="Upload audio file(s) to transcribe — pick several to batch them (needs deployed backend)"
+            style=${{border:'1px solid #E0D8D0',background:'white',color:'#7A7068',borderRadius:14,padding:'3px 9px',fontSize:10.5,fontWeight:500,cursor:'pointer'}}>Upload</button>
           <!-- Explicit extensions alongside audio/* so iOS Files doesn't gray out
-               .m4a (Voice Memos) — audio/* alone is unreliable on iOS. -->
-          <input ref=${fref} type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.m4b,.caf,.aiff,.mp4,.mpeg,.mpga,.webm,.ogg,.oga,.flac" style=${{display:'none'}}
-            onChange=${e=>{const f=e.target.files&&e.target.files[0];if(f)onAudioFile(f);e.target.value='';}}/>
+               .m4a (Voice Memos) — audio/* alone is unreliable on iOS. multiple = batch several memos at once. -->
+          <input ref=${fref} type="file" multiple accept="audio/*,.m4a,.mp3,.wav,.aac,.m4b,.caf,.aiff,.mp4,.mpeg,.mpga,.webm,.ogg,.oga,.flac" style=${{display:'none'}}
+            onChange=${e=>{const fs=e.target.files;if(fs&&fs.length)onAudioFiles(fs);e.target.value='';}}/>
         </div>
       </div>
       <textarea value=${capture} onInput=${e=>setCapture(e.target.value)}
@@ -2001,16 +2008,19 @@ const PanelResizer = ({width,setWidth,dir,min,max,maxByWindow}) => {
   const onDown=e=>{
     e.preventDefault();
     const startX=e.clientX,startW=width;
+    const clearSel=()=>{try{const s=window.getSelection&&window.getSelection();s&&s.removeAllRanges&&s.removeAllRanges();}catch(_){}};
+    const noSel=v=>{document.body.style.userSelect=v;document.body.style.webkitUserSelect=v;}; // webkit prefix for Safari/iPad
     const move=ev=>{
+      clearSel();
       const hi=Math.min(max,maxByWindow?maxByWindow():max);
       setWidth(Math.round(Math.max(min,Math.min(hi,startW+dir*(ev.clientX-startX)))));
     };
     const up=()=>{
       window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);
-      document.body.style.cursor='';document.body.style.userSelect='';
+      document.body.style.cursor='';noSel('');clearSel();
     };
     window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
-    document.body.style.cursor='col-resize';document.body.style.userSelect='none';
+    document.body.style.cursor='col-resize';noSel('none');clearSel();
   };
   return html`<div onPointerDown=${onDown} onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)}
     title="Drag to resize" role="separator"
