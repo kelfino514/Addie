@@ -101,11 +101,14 @@ let _syncUserId=null;          // set once signed in; gates remote writes
 let _supaP=null;
 const getSupa=()=>{
   if(!_supaP)_supaP=import('https://esm.sh/@supabase/supabase-js@2.45.0')
-    .then(({createClient})=>createClient(SUPABASE_URL,SUPABASE_ANON_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}}));
+    .then(({createClient})=>createClient(SUPABASE_URL,SUPABASE_ANON_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,flowType:'implicit'}}));
   return _supaP;
 };
-const sendOtp=email=>getSupa().then(s=>s.auth.signInWithOtp({email,options:{shouldCreateUser:true}}));
-const verifyOtp=(email,token)=>getSupa().then(s=>s.auth.verifyOtp({email,token,type:'email'}));
+// Passwordless email magic link. The default (free-tier) email template
+// renders a link, so we use the link flow — clicking it lands back here
+// already signed in (detectSessionInUrl). flowType:'implicit' keeps the
+// token self-contained so it works whichever browser/mail-app opens it.
+const sendMagicLink=email=>getSupa().then(s=>s.auth.signInWithOtp({email,options:{shouldCreateUser:true,emailRedirectTo:window.location.origin}}));
 const signOutSync=()=>getSupa().then(s=>s.auth.signOut());
 const pullRemote=async userId=>{
   const s=await getSupa();
@@ -1861,13 +1864,13 @@ const OverflowMenu = ({items}) => {
 };
 
 /* ── Auth Gate ─────────────────────────────────────────────────
-   Email one-time-code sign-in. Rendered only when sync is configured
-   and there's no session yet. A clicked magic link in the same email
-   also works (detectSessionInUrl). */
+   Passwordless email magic-link sign-in. Rendered only when sync is
+   configured and there's no session yet. Enter email → click the link
+   in the email on this device → it lands back here signed in
+   (detectSessionInUrl handles the redirect). */
 const AuthGate = () => {
   const[email,setEmail]=useState('');
-  const[code,setCode]=useState('');
-  const[step,setStep]=useState('email'); // 'email' | 'code'
+  const[step,setStep]=useState('email'); // 'email' | 'sent'
   const[busy,setBusy]=useState(false);
   const[err,setErr]=useState('');
   const INPUT={width:'100%',border:'1.5px solid #E0D8D0',borderRadius:9,padding:'11px 13px',fontSize:14,outline:'none',color:'#2A2825',background:'#FCFBF9',marginBottom:12,display:'block'};
@@ -1876,33 +1879,23 @@ const AuthGate = () => {
     const e=email.trim();
     if(!e){setErr('Enter your email.');return;}
     setBusy(true);setErr('');
-    try{const{error}=await sendOtp(e);if(error)throw error;setStep('code');}
-    catch(ex){setErr(ex?.message||'Could not send the code.');}
+    try{const{error}=await sendMagicLink(e);if(error)throw error;setStep('sent');}
+    catch(ex){setErr(ex?.message||'Could not send the link.');}
     finally{setBusy(false);}
-  };
-  const verify=async()=>{
-    const c=code.trim();
-    if(!c){setErr('Enter the 6-digit code.');return;}
-    setBusy(true);setErr('');
-    try{const{error}=await verifyOtp(email.trim(),c);if(error)throw error;/* onAuthStateChange takes over */}
-    catch(ex){setErr(ex?.message||'That code didn’t work — check it and try again.');setBusy(false);}
   };
   return html`
     <div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',background:'#F4F1ED',padding:20}}>
       <div style=${{background:'white',borderRadius:16,padding:'30px 30px 26px',width:'min(380px,92vw)',boxShadow:'0 16px 48px rgba(0,0,0,0.12)'}}>
         <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:24,marginBottom:6}}>Planner</div>
-        <div style=${{fontSize:13,color:'#7A7068',marginBottom:22,lineHeight:1.5}}>
-          ${step==='email'?'Sign in to sync your planner across devices.':html`Enter the 6-digit code we emailed to <b>${email.trim()}</b>. <span style=${{color:'#9A9088'}}>(Or just click the link in that email.)</span>`}
-        </div>
         ${step==='email'?html`
+          <div style=${{fontSize:13,color:'#7A7068',marginBottom:22,lineHeight:1.5}}>Sign in to sync your planner across devices.</div>
           <input type="email" autoFocus value=${email} onInput=${e=>setEmail(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')send();}}
             placeholder="you@email.com" style=${INPUT}/>
-          <button onClick=${send} disabled=${busy} style=${BTN(busy)}>${busy?'Sending…':'Send code'}</button>
+          <button onClick=${send} disabled=${busy} style=${BTN(busy)}>${busy?'Sending…':'Email me a sign-in link'}</button>
         `:html`
-          <input inputMode="numeric" autoFocus value=${code} onInput=${e=>setCode(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')verify();}}
-            placeholder="123456" style=${{...INPUT,letterSpacing:'4px',textAlign:'center',fontSize:18}}/>
-          <button onClick=${verify} disabled=${busy} style=${BTN(busy)}>${busy?'Verifying…':'Verify & sign in'}</button>
-          <button onClick=${()=>{setStep('email');setCode('');setErr('');}} style=${{background:'none',border:'none',color:'#9A9088',fontSize:12,cursor:'pointer',marginTop:12,textDecoration:'underline'}}>Use a different email</button>
+          <div style=${{fontSize:13,color:'#7A7068',marginBottom:18,lineHeight:1.55}}>Check your inbox — we emailed a sign-in link to <b>${email.trim()}</b>. Open it <b>on this device</b> to finish signing in.</div>
+          <button onClick=${send} disabled=${busy} style=${BTN(busy)}>${busy?'Sending…':'Resend link'}</button>
+          <button onClick=${()=>{setStep('email');setErr('');}} style=${{background:'none',border:'none',color:'#9A9088',fontSize:12,cursor:'pointer',marginTop:12,textDecoration:'underline'}}>Use a different email</button>
         `}
         ${err&&html`<div style=${{color:'#A0291E',fontSize:12,marginTop:12,lineHeight:1.4}}>${err}</div>`}
       </div>
