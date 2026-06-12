@@ -310,7 +310,7 @@ const NoteModal = ({note,onUpdate,onClose}) => {
 };
 
 /* ── Draggable Notes ───────────────────────────────────────── */
-const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220}) => {
+const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220,projectId,onMoveNote}) => {
   const[dragIdx,setDragIdx]=useState(null);
   const[overCol,setOverCol]=useState(null);
   const[overPos,setOverPos]=useState(null);
@@ -321,6 +321,9 @@ const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220}) => {
   const rightRefs=useRef([]);
   const notesRef=useRef(notes);
   useEffect(()=>{notesRef.current=notes;},[notes]);
+  const hoverZone=useRef(null);   // highlighted cross-project drop zone during a drag
+  const cbRef=useRef({});         // latest cross-project callbacks (avoid stale closure in the []-effect)
+  cbRef.current.onMoveNote=onMoveNote;cbRef.current.projectId=projectId;
 
   // Split into columns: even indices -> left, odd -> right
   const leftNotes=notes.map((n,i)=>({n,i})).filter(x=>x.i%2===0);
@@ -377,9 +380,20 @@ const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220}) => {
   }
 
   useEffect(()=>{
+    const zoneAt=(x,y)=>{const el=document.elementFromPoint(x,y);const z=el&&el.closest&&el.closest('[data-project-id]');const id=z&&z.getAttribute('data-project-id');return{z,id};};
+    const clearHover=()=>{if(hoverZone.current){hoverZone.current.style.outline='';hoverZone.current.style.outlineOffset='';hoverZone.current=null;}};
     function onMove(e){
       if(!isDragging.current)return;
       e.preventDefault();
+      const{onMoveNote:mv,projectId:pid}=cbRef.current;
+      if(mv&&pid){
+        const{z,id}=zoneAt(e.clientX,e.clientY);
+        const newZone=(id&&id!==pid)?z:null;
+        if(hoverZone.current&&hoverZone.current!==newZone){hoverZone.current.style.outline='';hoverZone.current.style.outlineOffset='';}
+        if(newZone){newZone.style.outline='2px dashed #9A8C78';newZone.style.outlineOffset='2px';}
+        hoverZone.current=newZone;
+        if(newZone){setOverCol(null);setOverPos(null);return;} // targeting another project — hide within-project indicator
+      }
       const{col,pos}=getDropTarget(e.clientX,e.clientY);
       dragState.current={overCol:col,overPos:pos};
       setOverCol(col);setOverPos(pos);
@@ -388,9 +402,16 @@ const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220}) => {
       if(!isDragging.current)return;
       isDragging.current=false;
       const fi=startIdx.current;
-      const{overCol:tc,overPos:tp}=dragState.current;
-      if(fi!==null&&tc!==null&&tp!==null){
-        applyReorder(fi,tc,tp);
+      const{onMoveNote:mv,projectId:pid}=cbRef.current;
+      let movedOut=false;
+      if(mv&&pid&&fi!=null){
+        const{id}=zoneAt(e.clientX,e.clientY);
+        if(id&&id!==pid){const note=notesRef.current[fi];if(note){mv(note,id);movedOut=true;}}
+      }
+      clearHover();
+      if(!movedOut){
+        const{overCol:tc,overPos:tp}=dragState.current;
+        if(fi!==null&&tc!==null&&tp!==null)applyReorder(fi,tc,tp);
       }
       startIdx.current=null;
       setDragIdx(null);setOverCol(null);setOverPos(null);
@@ -700,7 +721,7 @@ const EventRow = ({event,onToggleDone,onDelete,onEdit,onOpenPicker,onToggleImpor
     </div>`;
 };
 
-const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds,onTogglePriority,masterCollapsed,openColorPickerId,setOpenColorPickerId,weeks=1}) => {
+const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds,onTogglePriority,masterCollapsed,openColorPickerId,setOpenColorPickerId,weeks=1,onMoveNote}) => {
   const[newTask,setNewTask]=useState('');
   const[newReminder,setNewReminder]=useState('');
   const[newEvent,setNewEvent]=useState('');
@@ -777,7 +798,7 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
   return html`
     <${Fragment}>
       ${confirm&&html`<${ConfirmDialog} message=${`"${project.name}" and all its tasks and notes will be permanently deleted.`} onConfirm=${()=>{setConfirm(false);onDelete(project.id);}} onCancel=${()=>setConfirm(false)}/>`}
-      <div style=${{background:'white',borderRadius:16,overflow:'visible',boxShadow:isExpanded?'0 6px 28px rgba(0,0,0,0.09)':'0 1px 5px rgba(0,0,0,0.06)',border:'1px solid rgba(0,0,0,0.04)',transition:'box-shadow 0.2s'}}>
+      <div data-project-id=${project.id} style=${{background:'white',borderRadius:16,overflow:'visible',boxShadow:isExpanded?'0 6px 28px rgba(0,0,0,0.09)':'0 1px 5px rgba(0,0,0,0.06)',border:'1px solid rgba(0,0,0,0.04)',transition:'box-shadow 0.2s'}}>
         <div style=${{background:project.color,padding:'12px 14px',display:'flex',alignItems:'center',gap:9,cursor:'pointer',userSelect:'none',borderRadius:isExpanded?'14px 14px 0 0':'14px'}} onClick=${onToggle}>
           <div style=${{position:'relative',flexShrink:0}} onClick=${e=>e.stopPropagation()}>
             <div onClick=${()=>setOpenColorPickerId(isColorOpen?null:project.id)} style=${{width:16,height:16,borderRadius:'50%',background:project.color,cursor:'pointer',border:isLight(project.color)?'2px solid rgba(0,0,0,0.2)':'2px solid rgba(255,255,255,0.4)',boxShadow:'inset 0 0 0 2px rgba(255,255,255,0.3)',flexShrink:0}} title="Change color"/>
@@ -848,7 +869,7 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
             </div>
             ${project.notes.length===0
               ?html`<div style=${{color:'#C0B8B0',fontSize:12,fontStyle:'italic',lineHeight:1.6}}>Add sticky notes for this project.<br/><span style=${{fontSize:11}}>Tap color circle to recolor. Tap ⤢ to expand. Drag handle above note to reorder.</span></div>`
-              :html`<${DraggableNotes} notes=${project.notes} onReorder=${updateNotes} noteWidth=${leftCollapsed?(masterCollapsed?380:320):(masterCollapsed?280:220)}
+              :html`<${DraggableNotes} notes=${project.notes} onReorder=${updateNotes} projectId=${project.id} onMoveNote=${(note,toId)=>onMoveNote&&onMoveNote(note,project.id,toId)} noteWidth=${leftCollapsed?(masterCollapsed?380:320):(masterCollapsed?280:220)}
                 renderNote=${(note)=>html`<${StickyNote} key=${note.id} note=${note} onUpdate=${updateNote} onDelete=${()=>deleteNote(note.id)} projectColor=${project.color} noteWidth=${leftCollapsed?(masterCollapsed?380:320):(masterCollapsed?280:220)}/>`}/>`}
           </div>
 
@@ -2196,6 +2217,15 @@ const App = () => {
     else upState({calendarEvents:[...calendarEvents,{...ev,id:uid()}]});
   };
   const deleteCalendarEvent=id=>upState({calendarEvents:calendarEvents.filter(e=>e.id!==id)});
+  // Move a sticky note from one project to another (drag-and-drop between projects).
+  const moveNote=(note,fromId,toId)=>{
+    if(fromId===toId)return;
+    setState(s=>({...s,projects:s.projects.map(p=>{
+      if(p.id===fromId)return{...p,notes:(p.notes||[]).filter(n=>n.id!==note.id)};
+      if(p.id===toId)return{...p,notes:[...(p.notes||[]),note]};
+      return p;
+    })}));
+  };
   const setWeeks=n=>upState({weeksToShow:n});
   const upProjects=p=>upState({projects:p});
   const upProject=u=>upProjects(projects.map(p=>p.id===u.id?u:p));
@@ -2339,7 +2369,7 @@ const App = () => {
           </div>`}
           ${projects.length===0&&!addingProject&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#B0A898',fontSize:13}}><div style=${{fontSize:26,marginBottom:12,opacity:0.4}}>▤</div>No projects yet — add one above.</div>`}
           <${DraggableProjects} projects=${projects} onReorder=${upProjects}
-            renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow}/>`}/>
+            renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow} onMoveNote=${moveNote}/>`}/>
           </div>
         </div>
         ${!brainyCollapsed&&html`<${PanelResizer} width=${brainWidth} setWidth=${setBrainWidth} dir=${-1} min=${240} max=${600}
