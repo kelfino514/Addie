@@ -13,9 +13,17 @@ Definitions:
 - followUps: things waiting on someone ELSE, or to check back on.
 - Never put the same task in both lists. Only extract what the text actually supports — do not invent tasks. Empty arrays are fine.
 
-Phrasing (important): write every item as a terse note — a few words, the way someone jots a quick to-do, NOT a full sentence. Drop filler words, articles, and redundant verbs when the meaning stays clear; keep names, dates, numbers, and account/product names. Aim for ~3-5 words.
-- actionItems, e.g.: "Pricing sheet to Dr. Patel", "Confirm OR breakfast 6/4", "Prep INVOS renewal points", "Schedule super user class".
-- followUps, e.g.: "Tableau access from Patrick", "Trial dates from Mercy OR".
+Phrasing (CRITICAL — keep every item SHORT): write each item as terse shorthand, a fragment someone thumb-types into a to-do list, NEVER a sentence. Hard rules:
+- Aim for 3-5 words; 6 is the absolute max. If it reads like a sentence, cut it down.
+- Drop articles (a/an/the), pronouns (I/we/you), and filler verb phrases (need to, make sure to, follow up to, going to, should, want to, remember to).
+- Start with the key noun or a single action verb — no preamble or explanatory clauses ("so that…", "in order to…", "regarding…", "to discuss…").
+- KEEP names, accounts, products, dates, and numbers exactly as given.
+Rewrite long → terse (this is the level of compression expected):
+- "I need to send the updated hemodynamic pricing sheet over to Dr. Bailey" → "Pricing sheet to Dr. Bailey"
+- "Make sure to confirm the headcount and timing for the OR breakfast on June 4th" → "Confirm OR breakfast 6/4"
+- "We should prepare talking points for the INVOS contract renewal before the Rady visit" → "Prep INVOS renewal points"
+- "Schedule the super user training class for the new staff" → "Schedule super user class"
+- followUps: "Follow up with Patrick to get Tableau access" → "Tableau access from Patrick"; "Check back on trial dates from the Mercy OR team" → "Trial dates from Mercy OR".
 
 Consolidation rules (critical):
 - Merge closely related or redundant tasks into one. Prefer broader phrasing that covers the intent.
@@ -30,7 +38,7 @@ Also produce:
 
 const ITEM_SCHEMA = {
   type: 'object',
-  properties: { text: { type: 'string', description: 'The item, a short imperative' } },
+  properties: { text: { type: 'string', description: 'Terse shorthand note, 3-5 words (6 max), never a sentence. E.g. "Pricing sheet to Dr. Bailey", "Confirm OR breakfast 6/4".' } },
   required: ['text'],
   additionalProperties: false,
 };
