@@ -2002,21 +2002,23 @@ const AuthGate = () => {
 /* Registers a passkey on the current device for the signed-in user. Shown in
    the header so the user can opt in per device / ecosystem. */
 const PASSKEY_FLAG='passkey-added';
+const passkeyOnThisDevice=()=>{try{return !!localStorage.getItem(PASSKEY_FLAG);}catch(e){return false;}};
+const markPasskeyAdded=()=>{try{localStorage.setItem(PASSKEY_FLAG,'1');}catch(e){}};
+// Register a passkey, treating "already on this authenticator" (InvalidStateError) as success.
+const tryRegisterPasskey=async()=>{
+  try{const{error}=await registerPasskey();if(error)throw error;markPasskeyAdded();return 'ok';}
+  catch(ex){
+    const m=(((ex&&ex.name)||'')+' '+((ex&&ex.message)||'')).toLowerCase();
+    if(m.includes('invalidstate')||m.includes('already')||m.includes('exclude')){markPasskeyAdded();return 'ok';}
+    return 'err';
+  }
+};
 const AddPasskeyButton = () => {
-  // Remember success per device so reopening doesn't re-prompt (re-registering
-  // on an authenticator that already has one throws InvalidStateError).
-  const[st,setSt]=useState(()=>{try{return localStorage.getItem(PASSKEY_FLAG)?'done':'';}catch(e){return '';}});
-  const markDone=()=>{try{localStorage.setItem(PASSKEY_FLAG,'1');}catch(e){}setSt('done');};
-  const add=async()=>{
-    setSt('busy');
-    try{const{error}=await registerPasskey();if(error)throw error;markDone();}
-    catch(ex){
-      const m=(((ex&&ex.name)||'')+' '+((ex&&ex.message)||'')).toLowerCase();
-      // "already exists on this authenticator" → treat as done, not an error.
-      if(m.includes('invalidstate')||m.includes('already')||m.includes('exclude'))markDone();
-      else setSt('err');
-    }
-  };
+  const persisted=passkeyOnThisDevice(); // set up in a PRIOR session?
+  const[st,setSt]=useState(''); // '' | 'busy' | 'done' | 'err' — transient, THIS session only
+  const add=async()=>{setSt('busy');setSt((await tryRegisterPasskey())==='ok'?'done':'err');};
+  // Already set up before this session → keep the header clean; status lives in the ⋯ menu.
+  if(persisted&&st==='')return null;
   if(st==='done')return html`<span style=${{fontSize:12,color:'#5E9E5E',whiteSpace:'nowrap'}} title="A passkey is set up on this device">✓ Passkey on</span>`;
   return html`<button onClick=${add} disabled=${st==='busy'}
     title="Register a passkey on this device for faster sign-in next time"
@@ -2277,6 +2279,9 @@ const App = () => {
             {label:'Print',onClick:()=>{const h=buildPrintHTML(projects,priorityIds,completedExpanded);const w=window.open('','_blank');w.document.write(h);w.document.close();}},
             {label:'Export',onClick:()=>exportBackup(state)},
             {label:'Import',onClick:()=>fileRef.current?.click()},
+            ...(syncEnabled&&session?[passkeyOnThisDevice()
+              ?{label:'🔑 Passkey on (this device)',onClick:()=>{}}
+              :{label:'🔑 Set up a passkey',onClick:()=>{tryRegisterPasskey();}}]:[]),
           ]}/>
           <input ref=${fileRef} type="file" accept=".json" style=${{display:'none'}} onChange=${e=>{const f=e.target.files?.[0];if(f)importBackup(f,s=>{setState(s);setExpandedIds(new Set(s.projects?.map(p=>p.id)||[]));});e.target.value='';}}/>
           ${syncEnabled&&session&&html`<div style=${{display:'flex',alignItems:'center',gap:7,marginLeft:2}}>
