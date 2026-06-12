@@ -35,6 +35,9 @@ const html = htm.bind(h);
 /* ── Utilities ─────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2,10);
 const debounce = (fn,ms) => { let t; return (...a) => { clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; };
+// Lowercased word tokens, for fuzzy matching insight text to a project.
+const STOPWORDS=new Set(['the','and','for','with','from','this','that','your','about','into','need','make','sure','will','have','has','out','off','get','got','set','use','via','per','due','any','all','new','one','two','was','are','not','but','can','our','their','them','then','than','also','before','after','next','some']);
+const tokenize=s=>(s||'').toLowerCase().match(/[a-z0-9]+/g)||[];
 
 /* ── Color helpers ─────────────────────────────────────────── */
 function hexToHsl(hex){
@@ -70,6 +73,10 @@ const PRIORITY_COLOR='#D4758A', PRIORITY_BG='#FFF8E1';
 const REMINDER_COLOR='#5B8FBF', REMINDER_BG='#EEF4FB';
 const PROJECT_COLORS=['#2A2825','#5C5650','#8C8480','#FFFFFF','#F4F1ED','#C8B8A2','#A8BBA8','#B8C4CC','#C4B8C8','#CCBFB0','#A8C4BC','#F7D9D9','#FAE5CC','#FDF3CC','#E8F5D9','#D9EBF7','#D9D9F7','#F0D9F7','#D9F0F7'];
 const STANDARD_COLORS=['#FFF3BF','#D4EAD4','#D6E8F5','#F5D6E8','#EDE0D4','#E8D6F5','#FFE4CC','#D4E8E8'];
+// Calendar-event swatches: the standard pastels plus a muted "FYI" gray for
+// non-actionable day notes (partner on PTO, no-travel days, etc.).
+const FYI_COLOR='#CFCAC2';
+const CAL_EVENT_COLORS=[...STANDARD_COLORS,FYI_COLOR];
 /* Uniform fixed-width slot for trailing row icons (calendar / star / flag / delete)
    so they line up into clean columns against the right margin across every row. */
 const ICON_BTN={background:'none',border:'none',cursor:'pointer',lineHeight:1,flexShrink:0,width:20,height:20,padding:0,display:'flex',alignItems:'center',justifyContent:'center',transition:'color 0.15s'};
@@ -303,7 +310,7 @@ const NoteModal = ({note,onUpdate,onClose}) => {
 };
 
 /* ── Draggable Notes ───────────────────────────────────────── */
-const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220}) => {
+const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220,projectId,onMoveNote}) => {
   const[dragIdx,setDragIdx]=useState(null);
   const[overCol,setOverCol]=useState(null);
   const[overPos,setOverPos]=useState(null);
@@ -314,6 +321,9 @@ const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220}) => {
   const rightRefs=useRef([]);
   const notesRef=useRef(notes);
   useEffect(()=>{notesRef.current=notes;},[notes]);
+  const hoverZone=useRef(null);   // highlighted cross-project drop zone during a drag
+  const cbRef=useRef({});         // latest cross-project callbacks (avoid stale closure in the []-effect)
+  cbRef.current.onMoveNote=onMoveNote;cbRef.current.projectId=projectId;
 
   // Split into columns: even indices -> left, odd -> right
   const leftNotes=notes.map((n,i)=>({n,i})).filter(x=>x.i%2===0);
@@ -370,9 +380,20 @@ const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220}) => {
   }
 
   useEffect(()=>{
+    const zoneAt=(x,y)=>{const el=document.elementFromPoint(x,y);const z=el&&el.closest&&el.closest('[data-project-id]');const id=z&&z.getAttribute('data-project-id');return{z,id};};
+    const clearHover=()=>{if(hoverZone.current){hoverZone.current.style.outline='';hoverZone.current.style.outlineOffset='';hoverZone.current=null;}};
     function onMove(e){
       if(!isDragging.current)return;
       e.preventDefault();
+      const{onMoveNote:mv,projectId:pid}=cbRef.current;
+      if(mv&&pid){
+        const{z,id}=zoneAt(e.clientX,e.clientY);
+        const newZone=(id&&id!==pid)?z:null;
+        if(hoverZone.current&&hoverZone.current!==newZone){hoverZone.current.style.outline='';hoverZone.current.style.outlineOffset='';}
+        if(newZone){newZone.style.outline='2px dashed #9A8C78';newZone.style.outlineOffset='2px';}
+        hoverZone.current=newZone;
+        if(newZone){setOverCol(null);setOverPos(null);return;} // targeting another project — hide within-project indicator
+      }
       const{col,pos}=getDropTarget(e.clientX,e.clientY);
       dragState.current={overCol:col,overPos:pos};
       setOverCol(col);setOverPos(pos);
@@ -381,9 +402,16 @@ const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220}) => {
       if(!isDragging.current)return;
       isDragging.current=false;
       const fi=startIdx.current;
-      const{overCol:tc,overPos:tp}=dragState.current;
-      if(fi!==null&&tc!==null&&tp!==null){
-        applyReorder(fi,tc,tp);
+      const{onMoveNote:mv,projectId:pid}=cbRef.current;
+      let movedOut=false;
+      if(mv&&pid&&fi!=null){
+        const{id}=zoneAt(e.clientX,e.clientY);
+        if(id&&id!==pid){const note=notesRef.current[fi];if(note){mv(note,id);movedOut=true;}}
+      }
+      clearHover();
+      if(!movedOut){
+        const{overCol:tc,overPos:tp}=dragState.current;
+        if(fi!==null&&tc!==null&&tp!==null)applyReorder(fi,tc,tp);
       }
       startIdx.current=null;
       setDragIdx(null);setOverCol(null);setOverPos(null);
@@ -693,7 +721,7 @@ const EventRow = ({event,onToggleDone,onDelete,onEdit,onOpenPicker,onToggleImpor
     </div>`;
 };
 
-const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds,onTogglePriority,masterCollapsed,openColorPickerId,setOpenColorPickerId,weeks=1}) => {
+const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds,onTogglePriority,masterCollapsed,openColorPickerId,setOpenColorPickerId,weeks=1,onMoveNote}) => {
   const[newTask,setNewTask]=useState('');
   const[newReminder,setNewReminder]=useState('');
   const[newEvent,setNewEvent]=useState('');
@@ -770,7 +798,7 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
   return html`
     <${Fragment}>
       ${confirm&&html`<${ConfirmDialog} message=${`"${project.name}" and all its tasks and notes will be permanently deleted.`} onConfirm=${()=>{setConfirm(false);onDelete(project.id);}} onCancel=${()=>setConfirm(false)}/>`}
-      <div style=${{background:'white',borderRadius:16,overflow:'visible',boxShadow:isExpanded?'0 6px 28px rgba(0,0,0,0.09)':'0 1px 5px rgba(0,0,0,0.06)',border:'1px solid rgba(0,0,0,0.04)',transition:'box-shadow 0.2s'}}>
+      <div data-project-id=${project.id} style=${{background:'white',borderRadius:16,overflow:'visible',boxShadow:isExpanded?'0 6px 28px rgba(0,0,0,0.09)':'0 1px 5px rgba(0,0,0,0.06)',border:'1px solid rgba(0,0,0,0.04)',transition:'box-shadow 0.2s'}}>
         <div style=${{background:project.color,padding:'12px 14px',display:'flex',alignItems:'center',gap:9,cursor:'pointer',userSelect:'none',borderRadius:isExpanded?'14px 14px 0 0':'14px'}} onClick=${onToggle}>
           <div style=${{position:'relative',flexShrink:0}} onClick=${e=>e.stopPropagation()}>
             <div onClick=${()=>setOpenColorPickerId(isColorOpen?null:project.id)} style=${{width:16,height:16,borderRadius:'50%',background:project.color,cursor:'pointer',border:isLight(project.color)?'2px solid rgba(0,0,0,0.2)':'2px solid rgba(255,255,255,0.4)',boxShadow:'inset 0 0 0 2px rgba(255,255,255,0.3)',flexShrink:0}} title="Change color"/>
@@ -841,7 +869,7 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
             </div>
             ${project.notes.length===0
               ?html`<div style=${{color:'#C0B8B0',fontSize:12,fontStyle:'italic',lineHeight:1.6}}>Add sticky notes for this project.<br/><span style=${{fontSize:11}}>Tap color circle to recolor. Tap ⤢ to expand. Drag handle above note to reorder.</span></div>`
-              :html`<${DraggableNotes} notes=${project.notes} onReorder=${updateNotes} noteWidth=${leftCollapsed?(masterCollapsed?380:320):(masterCollapsed?280:220)}
+              :html`<${DraggableNotes} notes=${project.notes} onReorder=${updateNotes} projectId=${project.id} onMoveNote=${(note,toId)=>onMoveNote&&onMoveNote(note,project.id,toId)} noteWidth=${leftCollapsed?(masterCollapsed?380:320):(masterCollapsed?280:220)}
                 renderNote=${(note)=>html`<${StickyNote} key=${note.id} note=${note} onUpdate=${updateNote} onDelete=${()=>deleteNote(note.id)} projectColor=${project.color} noteWidth=${leftCollapsed?(masterCollapsed?380:320):(masterCollapsed?280:220)}/>`}/>`}
           </div>
 
@@ -1335,11 +1363,68 @@ const DayTimePicker = ({task,onAssign,onClose,isEvent=false,weeks=1}) => {
 };
 
 /* ── Week Calendar Strip ────────────────────────────────────── */
-const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssignDay,weeks=1,onSetWeeks}) => {
+/* A standalone calendar event chip (not tied to a project). Spans multiple
+   days as a colored bar — name shown on the first day only, plain color on the
+   continuation days. Hover reveals an × to delete the whole event. */
+const CalEventChip = ({ev,isStart,onEdit,onDelete,onDragStart}) => {
+  const[hov,setHov]=useState(false);
+  const fyi=ev.color===FYI_COLOR;
+  return html`<div onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)}
+    draggable=${!!onDragStart} onDragStart=${onDragStart} onClick=${()=>onEdit&&onEdit(ev)} title="Edit event"
+    style=${{position:'relative',background:ev.color,borderRadius:4,padding:'2px 5px',marginBottom:3,minHeight:15,display:'flex',alignItems:'center',cursor:'pointer',
+      borderLeft:isStart?`2px solid ${darken(ev.color)}`:'none',opacity:fyi?0.85:1}}>
+    <span style=${{fontSize:9.5,color:fyi?'#6A625A':'#2A2825',fontStyle:fyi?'italic':'normal',lineHeight:1.2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1}}>
+      ${isStart?ev.text:' '}
+    </span>
+    ${hov&&onDelete&&html`<button onClick=${e=>{e.stopPropagation();onDelete(ev.id);}} title="Delete event"
+      style=${{position:'absolute',right:1,top:'50%',transform:'translateY(-50%)',background:'rgba(255,255,255,0.75)',border:'none',borderRadius:3,color:'#A0291E',fontSize:11,lineHeight:1,cursor:'pointer',padding:'0 3px'}}>×</button>`}
+  </div>`;
+};
+
+/* Modal form for creating a standalone calendar event: name, start/end dates
+   (native date inputs — reliable on iPad), and a color incl. the FYI gray. */
+const CalEventForm = ({event,onSave,onDelete,onClose}) => {
+  const today=todayISO();
+  const[name,setName]=useState(event?event.text:'');
+  const[start,setStart]=useState(event?event.startDate:today);
+  const[end,setEnd]=useState(event?(event.endDate||event.startDate):today);
+  const[color,setColor]=useState(event?event.color:CAL_EVENT_COLORS[0]);
+  const inp={border:'1px solid #E0D8D0',borderRadius:7,padding:'7px 9px',fontSize:13,outline:'none',color:'#2A2825',background:'white',width:'100%'};
+  const submit=()=>{const t=name.trim();if(!t)return;let s=start||today,e=end||s;if(e<s)e=s;onSave({...(event||{}),text:t,startDate:s,endDate:e,color});onClose();};
+  return html`
+    <div style=${{position:'fixed',inset:0,zIndex:3000,background:'rgba(42,40,37,0.45)',display:'flex',alignItems:'center',justifyContent:'center'}} onClick=${onClose}>
+      <div onClick=${e=>e.stopPropagation()} style=${{background:'white',borderRadius:14,padding:'20px 22px',width:'min(360px,92vw)',boxShadow:'0 16px 48px rgba(0,0,0,0.2)'}}>
+        <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:18,marginBottom:14}}>${event?'Edit calendar event':'New calendar event'}</div>
+        <input autoFocus value=${name} onInput=${e=>setName(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')submit();}} placeholder="Event name…" style=${{...inp,marginBottom:12}}/>
+        <div style=${{display:'flex',gap:10,marginBottom:14}}>
+          <label style=${{flex:1,fontSize:11,color:'#7A7068',fontWeight:600}}>Start<input type="date" value=${start} onInput=${e=>{setStart(e.target.value);if(end<e.target.value)setEnd(e.target.value);}} style=${{...inp,marginTop:4}}/></label>
+          <label style=${{flex:1,fontSize:11,color:'#7A7068',fontWeight:600}}>End<input type="date" value=${end} min=${start} onInput=${e=>setEnd(e.target.value)} style=${{...inp,marginTop:4}}/></label>
+        </div>
+        <div style=${{fontSize:11,color:'#7A7068',fontWeight:600,marginBottom:7}}>Color</div>
+        <div style=${{display:'flex',gap:7,flexWrap:'wrap',marginBottom:18}}>
+          ${CAL_EVENT_COLORS.map(c=>html`<div key=${c} onClick=${()=>setColor(c)} title=${c===FYI_COLOR?'FYI / gray':'Event color'}
+            style=${{width:26,height:26,borderRadius:'50%',background:c,cursor:'pointer',flexShrink:0,position:'relative',border:color===c?'2.5px solid #2A2825':'1.5px solid rgba(0,0,0,0.12)'}}>
+            ${c===FYI_COLOR&&html`<span style=${{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:7.5,color:'#6A625A',fontWeight:700}}>FYI</span>`}</div>`)}
+        </div>
+        <div style=${{display:'flex',gap:10,alignItems:'center',justifyContent:'space-between'}}>
+          ${event&&onDelete?html`<button onClick=${()=>{onDelete(event.id);onClose();}} style=${{background:'none',border:'none',color:'#A0291E',fontSize:13,cursor:'pointer',fontWeight:500}}>Delete</button>`:html`<span/>`}
+          <div style=${{display:'flex',gap:10}}>
+            <button onClick=${onClose} style=${{background:'#F0EBE5',color:'#2A2825',border:'none',borderRadius:8,padding:'8px 16px',fontSize:13,cursor:'pointer',fontWeight:500}}>Cancel</button>
+            <button onClick=${submit} style=${{background:'#2A2825',color:'white',border:'none',borderRadius:8,padding:'8px 16px',fontSize:13,cursor:'pointer',fontWeight:500}}>${event?'Save':'Add event'}</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+};
+
+const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssignDay,weeks=1,onSetWeeks,calendarEvents=[],onSaveCalendarEvent,onDeleteCalendarEvent}) => {
   const weekDates=getWeekDates(weeks);
   const today=new Date().getDay();
   const[pickerTask,setPickerTask]=useState(null);
   const[pickerPos,setPickerPos]=useState({top:0,left:0});
+  const[eventForm,setEventForm]=useState(null); // null=closed | 'new' (add) | event object (edit)
+  // Standalone calendar events, sorted so a multi-day event keeps a stable row across days.
+  const sortedCalEvents=[...calendarEvents].sort((a,b)=>a.startDate<b.startDate?-1:a.startDate>b.startDate?1:(a.id<b.id?-1:1));
   const openTaskPicker=(e,t)=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setPickerPos({top:Math.min(r.bottom+4,window.innerHeight-400),left:Math.max(4,Math.min(r.left,window.innerWidth-300))});setPickerTask(t);};
 
   const allTasks=projects.flatMap(p=>
@@ -1366,29 +1451,44 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
     return{eventsNoTime,untimedTasks,timed};
   };
 
+  // Drag-to-reschedule between days. Payload held in a ref; HTML5 DnD across cells.
+  const dragItem=useRef(null);
+  const[dragOverIso,setDragOverIso]=useState(null);
+  const startItemDrag=(ev,it)=>{dragItem.current={t:'item',id:it.id,kind:it.kind,taskTime:it.taskTime||null,endTime:it.endTime||null};try{ev.dataTransfer.effectAllowed='move';ev.dataTransfer.setData('text/plain',it.id);}catch(_){}};
+  const startCalDrag=(ev,ce)=>{dragItem.current={t:'cal',id:ce.id};try{ev.dataTransfer.effectAllowed='move';ev.dataTransfer.setData('text/plain',ce.id);}catch(_){}};
+  const onDayOver=(ev,iso)=>{if(dragItem.current){ev.preventDefault();ev.dataTransfer.dropEffect='move';if(dragOverIso!==iso)setDragOverIso(iso);}};
+  const onDayDrop=(ev,iso)=>{
+    ev.preventDefault();const d=dragItem.current;dragItem.current=null;setDragOverIso(null);if(!d)return;
+    if(d.t==='item'){onAssignDay&&onAssignDay(d.id,iso,d.taskTime,d.endTime,d.kind);}
+    else if(d.t==='cal'&&onSaveCalendarEvent){const ce=calendarEvents.find(e=>e.id===d.id);if(ce){const span=new Date(ce.endDate||ce.startDate).getTime()-new Date(ce.startDate).getTime();const ne=new Date(new Date(iso).getTime()+span).toISOString().slice(0,10);onSaveCalendarEvent({...ce,startDate:iso,endDate:ne});}}
+  };
   const renderDayCell=(i,d)=>{
-    const isToday=toISO(d)===todayISO();
-    const{eventsNoTime,untimedTasks,timed}=itemsForDay(toISO(d));
-    const hasAny=eventsNoTime.length>0||untimedTasks.length>0||timed.length>0;
+    const iso=toISO(d);
+    const isToday=iso===todayISO();
+    const{eventsNoTime,untimedTasks,timed}=itemsForDay(iso);
+    const dayEvents=sortedCalEvents.filter(ev=>ev.startDate<=iso&&iso<=(ev.endDate||ev.startDate));
+    const hasAny=dayEvents.length>0||eventsNoTime.length>0||untimedTasks.length>0||timed.length>0;
     const col=i%7;
     return html`
-      <div key=${i} style=${{borderRight:col<6?'1px solid #F0EBE5':'none',padding:'5px 5px',background:isToday?'#FAFAF8':'white',overflowY:'auto',minHeight:62,maxHeight:weeks>1?150:240}}>
+      <div key=${i} onDragOver=${ev=>onDayOver(ev,iso)} onDrop=${ev=>onDayDrop(ev,iso)} onDragLeave=${()=>{if(dragOverIso===iso)setDragOverIso(null);}}
+        style=${{borderRight:col<6?'1px solid #F0EBE5':'none',padding:'5px 5px',background:dragOverIso===iso?'#EAF1FB':isToday?'#FAFAF8':'white',overflowY:'auto',minHeight:62,maxHeight:weeks>1?150:240,transition:'background 0.1s'}}>
         <div style=${{marginBottom:5,textAlign:'center'}}>
           <div style=${{fontSize:12,fontWeight:600,lineHeight:1,background:isToday?'#2A2825':'none',color:isToday?'white':'#9A9088',
             borderRadius:'50%',width:20,height:20,display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto'}}>${d.getDate()}</div>
         </div>
+        ${dayEvents.map(ev=>html`<${CalEventChip} key=${ev.id} ev=${ev} isStart=${ev.startDate===iso} onEdit=${setEventForm} onDelete=${onDeleteCalendarEvent} onDragStart=${e=>startCalDrag(e,ev)}/>`)}
         ${eventsNoTime.map(e=>html`
-          <div key=${e.id} style=${{background:e.important?PRIORITY_BG:'#F0EBE5',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${e.projectColor}`,cursor:'pointer'}} onClick=${ev=>openTaskPicker(ev,e)}>
+          <div key=${e.id} draggable=${true} onDragStart=${ev=>startItemDrag(ev,e)} style=${{background:e.important?PRIORITY_BG:'#F0EBE5',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${e.projectColor}`,cursor:'grab'}} onClick=${ev=>openTaskPicker(ev,e)}>
             <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${e.text}</div>
           </div>`)}
         ${untimedTasks.map(t=>html`
-          <div key=${t.id} style=${{background:(t.kind==='task'&&priorityIds.includes(t.id))?PRIORITY_BG:'#F7F5F2',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${t.projectColor}`,cursor:'pointer'}} onClick=${e=>openTaskPicker(e,t)}>
+          <div key=${t.id} draggable=${true} onDragStart=${ev=>startItemDrag(ev,t)} style=${{background:(t.kind==='task'&&priorityIds.includes(t.id))?PRIORITY_BG:'#F7F5F2',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${t.projectColor}`,cursor:'grab'}} onClick=${e=>openTaskPicker(e,t)}>
             <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${t.text}</div>
           </div>`)}
         ${timed.length>0&&html`
           <div style=${{borderTop:'1px solid #EAE4DC',marginTop:3,paddingTop:3}}>
             ${timed.map(t=>html`
-              <div key=${t.id} style=${{background:t.kind==='event'?t.important?PRIORITY_BG:'#F0EBE5':t.kind==='task'&&priorityIds.includes(t.id)?PRIORITY_BG:'#EEF4FB',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${t.projectColor}`,cursor:'pointer'}} onClick=${e=>openTaskPicker(e,t)}>
+              <div key=${t.id} draggable=${true} onDragStart=${ev=>startItemDrag(ev,t)} style=${{background:t.kind==='event'?t.important?PRIORITY_BG:'#F0EBE5':t.kind==='task'&&priorityIds.includes(t.id)?PRIORITY_BG:'#EEF4FB',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${t.projectColor}`,cursor:'grab'}} onClick=${e=>openTaskPicker(e,t)}>
                 <div style=${{fontSize:9,color:'#9A9088',marginBottom:1}}>${fmtTime(t.taskTime)}${t.endTime?'–'+fmtTime(t.endTime):''}</div>
                 <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${t.text}</div>
               </div>`)}
@@ -1412,6 +1512,7 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
     </div>`;
 
   return html`
+    <${Fragment}>
     <div style=${{background:'white',borderBottom:'1px solid #EAE4DC',flexShrink:0}}>
       <!-- Header row -->
       <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 20px 6px'}}>
@@ -1425,6 +1526,8 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
           <span style=${{fontFamily:"'DM Serif Display',serif",fontSize:14,color:'#2A2825'}}>${weeks===1?'This Week':fmtRange(weekDates)}</span>
         </div>
         <div style=${{display:'flex',alignItems:'center',gap:12}}>
+          ${onSaveCalendarEvent&&html`<button onClick=${()=>setEventForm('new')} title="Add a calendar event (can span multiple days)"
+            style=${{display:'flex',alignItems:'center',gap:3,background:'#2A2825',color:'#F4F1ED',border:'none',borderRadius:14,padding:'4px 11px',fontSize:11,fontWeight:500,cursor:'pointer'}}>+ Event</button>`}
           <div style=${{display:'flex',alignItems:'center',gap:6}}>
             <span style=${{fontSize:9.5,letterSpacing:'0.5px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>Weeks</span>
             <div style=${{display:'flex',border:'1px solid #E0D8D0',borderRadius:6,overflow:'hidden'}}>
@@ -1453,7 +1556,9 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
             ${Array.from({length:7}).map((_,col)=>renderDayCell(w*7+col,weekDates[w*7+col]))}
           </div>`)}
       </div>
-    </div>`;
+    </div>
+    ${eventForm&&onSaveCalendarEvent&&html`<${CalEventForm} event=${eventForm==='new'?null:eventForm} onSave=${onSaveCalendarEvent} onDelete=${onDeleteCalendarEvent} onClose=${()=>setEventForm(null)}/>`}
+    <//>`;
 };
 
 /* ── Print ─────────────────────────────────────────────────── */
@@ -1615,10 +1720,27 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
   const[dragIdx,setDragIdx]=useState(null);
   const[overIdx,setOverIdx]=useState(null);
   const SR=typeof window!=='undefined'?(window.SpeechRecognition||window.webkitSpeechRecognition):null;
+  // Best-guess project: infer from the insight text by matching its words against
+  // each project's name (weighted) and its existing items/notes.
+  const guessProject=ins=>{
+    const words=new Set(tokenize(ins.text).filter(w=>w.length>=3&&!STOPWORDS.has(w)));
+    if(!words.size)return null;
+    let bestId=null,bestScore=0;
+    for(const p of projects){
+      let score=0;
+      for(const w of tokenize(p.name))if(w.length>=3&&!STOPWORDS.has(w)&&words.has(w))score+=3;
+      const blob=[...(p.tasks||[]),...(p.reminders||[]),...(p.events||[])].map(it=>it.text).join(' ')+' '+(p.notes||[]).map(n=>(n.title||'')+' '+(n.text||'')).join(' ');
+      const toks=new Set(tokenize(blob));
+      for(const w of words)if(toks.has(w))score+=1;
+      if(score>bestScore){bestScore=score;bestId=p.id;}
+    }
+    return bestScore>0?bestId:null;
+  };
   const projForInsight=ins=>{
     if(sel[ins.id])return sel[ins.id];
-    const m=projects.find(p=>p.name===ins.suggestProject);
-    return m?m.id:(projects[0]&&projects[0].id);
+    const m=projects.find(p=>p.name===ins.suggestProject); // explicit suggestion (sample data)
+    if(m)return m.id;
+    return guessProject(ins)||(projects[0]&&projects[0].id);
   };
   const selectProject=(id,pid)=>setSel(s=>({...s,[id]:pid}));
   const toggleImportant=id=>setImp(s=>({...s,[id]:!s[id]}));
@@ -1682,27 +1804,34 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
     }
     setBusy(null);setCapture('');
   };
-  const onAudioFile=async(file)=>{
-    if(!file||busy)return;
+  // Transcribe a single file to text (chunking long recordings).
+  const transcribeFile=async(file)=>{
+    if(file.size<=TX_DIRECT_MAX)return await transcribeBlob(file,file.name);
+    const mono=await decodeToMono(file);
+    const chunkSamples=TX_CHUNK_SECONDS*TX_SAMPLE_RATE;
+    const total=Math.max(1,Math.ceil(mono.length/chunkSamples));
+    const chunks=Array.from({length:total},(_,i)=>encodeWav(mono.slice(i*chunkSamples,(i+1)*chunkSamples),TX_SAMPLE_RATE));
+    const parts=await Promise.all(chunks.map((wav,i)=>transcribeBlob(wav,`chunk${i}.wav`)));
+    const text=parts.filter(Boolean).join(' ').trim();
+    if(!text)throw new Error('No speech detected in the recording.');
+    return text;
+  };
+  // Batch: transcribe one or many files in sequence, appending each transcript
+  // so a day's worth of short voice memos can be extracted together.
+  const onAudioFiles=async(files)=>{
+    const list=[...files].filter(Boolean);
+    if(!list.length||busy)return;
     setNote(null);
+    const n=list.length;
     try{
-      let text;
-      if(file.size<=TX_DIRECT_MAX){
-        setBusy('Transcribing…');
-        text=await transcribeBlob(file,file.name);
-      } else {
-        // Long recording: decode in-browser, split into ~2-min chunks, transcribe in parallel.
-        setBusy('Preparing audio…');
-        const mono=await decodeToMono(file);
-        const chunkSamples=TX_CHUNK_SECONDS*TX_SAMPLE_RATE;
-        const total=Math.max(1,Math.ceil(mono.length/chunkSamples));
-        setBusy(`Transcribing ${total} chunk${total>1?'s':''}…`);
-        const chunks=Array.from({length:total},(_,i)=>encodeWav(mono.slice(i*chunkSamples,(i+1)*chunkSamples),TX_SAMPLE_RATE));
-        const parts=await Promise.all(chunks.map((wav,i)=>transcribeBlob(wav,`chunk${i}.wav`)));
-        text=parts.filter(Boolean).join(' ').trim();
-        if(!text)throw new Error('No speech detected in the recording.');
+      const all=[];
+      for(let i=0;i<n;i++){
+        setBusy(n>1?`Transcribing ${i+1} of ${n}…`:'Transcribing…');
+        const text=await transcribeFile(list[i]);
+        if(text&&text.trim())all.push(text.trim());
       }
-      setCapture(prev=>(prev?prev.trim()+' ':'')+text);
+      const joined=all.join('\n\n');
+      if(joined)setCapture(prev=>(prev?prev.trim()+'\n\n':'')+joined);
     }catch(e){
       const m=e&&e.message?e.message:'';
       setNote(m&&!/fetch/i.test(m)?m:'Could not reach the transcription function (expected when running locally — try Live listen).');
@@ -1745,12 +1874,12 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
             <span class=${listening?'brain-rec-dot':''} style=${{width:7,height:7,borderRadius:'50%',background:listening?'#C7493A':'#9A9088',display:'inline-block',flexShrink:0}}/>
             ${listening?'Listening… stop':'Live listen'}
           </button>
-          <button onClick=${()=>fref.current&&fref.current.click()} title="Upload an audio file to transcribe (needs deployed backend)"
-            style=${{border:'1px solid #E0D8D0',background:'white',color:'#7A7068',borderRadius:14,padding:'3px 9px',fontSize:10.5,fontWeight:500,cursor:'pointer'}}>🎧 Upload</button>
+          <button onClick=${()=>fref.current&&fref.current.click()} title="Upload audio file(s) to transcribe — pick several to batch them (needs deployed backend)"
+            style=${{border:'1px solid #E0D8D0',background:'white',color:'#7A7068',borderRadius:14,padding:'3px 9px',fontSize:10.5,fontWeight:500,cursor:'pointer'}}>Upload</button>
           <!-- Explicit extensions alongside audio/* so iOS Files doesn't gray out
-               .m4a (Voice Memos) — audio/* alone is unreliable on iOS. -->
-          <input ref=${fref} type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.m4b,.caf,.aiff,.mp4,.mpeg,.mpga,.webm,.ogg,.oga,.flac" style=${{display:'none'}}
-            onChange=${e=>{const f=e.target.files&&e.target.files[0];if(f)onAudioFile(f);e.target.value='';}}/>
+               .m4a (Voice Memos) — audio/* alone is unreliable on iOS. multiple = batch several memos at once. -->
+          <input ref=${fref} type="file" multiple accept="audio/*,.m4a,.mp3,.wav,.aac,.m4b,.caf,.aiff,.mp4,.mpeg,.mpga,.webm,.ogg,.oga,.flac" style=${{display:'none'}}
+            onChange=${e=>{const fs=e.target.files;if(fs&&fs.length)onAudioFiles(fs);e.target.value='';}}/>
         </div>
       </div>
       <textarea value=${capture} onInput=${e=>setCapture(e.target.value)}
@@ -1906,21 +2035,23 @@ const AuthGate = () => {
 /* Registers a passkey on the current device for the signed-in user. Shown in
    the header so the user can opt in per device / ecosystem. */
 const PASSKEY_FLAG='passkey-added';
+const passkeyOnThisDevice=()=>{try{return !!localStorage.getItem(PASSKEY_FLAG);}catch(e){return false;}};
+const markPasskeyAdded=()=>{try{localStorage.setItem(PASSKEY_FLAG,'1');}catch(e){}};
+// Register a passkey, treating "already on this authenticator" (InvalidStateError) as success.
+const tryRegisterPasskey=async()=>{
+  try{const{error}=await registerPasskey();if(error)throw error;markPasskeyAdded();return 'ok';}
+  catch(ex){
+    const m=(((ex&&ex.name)||'')+' '+((ex&&ex.message)||'')).toLowerCase();
+    if(m.includes('invalidstate')||m.includes('already')||m.includes('exclude')){markPasskeyAdded();return 'ok';}
+    return 'err';
+  }
+};
 const AddPasskeyButton = () => {
-  // Remember success per device so reopening doesn't re-prompt (re-registering
-  // on an authenticator that already has one throws InvalidStateError).
-  const[st,setSt]=useState(()=>{try{return localStorage.getItem(PASSKEY_FLAG)?'done':'';}catch(e){return '';}});
-  const markDone=()=>{try{localStorage.setItem(PASSKEY_FLAG,'1');}catch(e){}setSt('done');};
-  const add=async()=>{
-    setSt('busy');
-    try{const{error}=await registerPasskey();if(error)throw error;markDone();}
-    catch(ex){
-      const m=(((ex&&ex.name)||'')+' '+((ex&&ex.message)||'')).toLowerCase();
-      // "already exists on this authenticator" → treat as done, not an error.
-      if(m.includes('invalidstate')||m.includes('already')||m.includes('exclude'))markDone();
-      else setSt('err');
-    }
-  };
+  const persisted=passkeyOnThisDevice(); // set up in a PRIOR session?
+  const[st,setSt]=useState(''); // '' | 'busy' | 'done' | 'err' — transient, THIS session only
+  const add=async()=>{setSt('busy');setSt((await tryRegisterPasskey())==='ok'?'done':'err');};
+  // Already set up before this session → keep the header clean; status lives in the ⋯ menu.
+  if(persisted&&st==='')return null;
   if(st==='done')return html`<span style=${{fontSize:12,color:'#5E9E5E',whiteSpace:'nowrap'}} title="A passkey is set up on this device">✓ Passkey on</span>`;
   return html`<button onClick=${add} disabled=${st==='busy'}
     title="Register a passkey on this device for faster sign-in next time"
@@ -1936,16 +2067,19 @@ const PanelResizer = ({width,setWidth,dir,min,max,maxByWindow}) => {
   const onDown=e=>{
     e.preventDefault();
     const startX=e.clientX,startW=width;
+    const clearSel=()=>{try{const s=window.getSelection&&window.getSelection();s&&s.removeAllRanges&&s.removeAllRanges();}catch(_){}};
+    const noSel=v=>{document.body.style.userSelect=v;document.body.style.webkitUserSelect=v;}; // webkit prefix for Safari/iPad
     const move=ev=>{
+      clearSel();
       const hi=Math.min(max,maxByWindow?maxByWindow():max);
       setWidth(Math.round(Math.max(min,Math.min(hi,startW+dir*(ev.clientX-startX)))));
     };
     const up=()=>{
       window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);
-      document.body.style.cursor='';document.body.style.userSelect='';
+      document.body.style.cursor='';noSel('');clearSel();
     };
     window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
-    document.body.style.cursor='col-resize';document.body.style.userSelect='none';
+    document.body.style.cursor='col-resize';noSel('none');clearSel();
   };
   return html`<div onPointerDown=${onDown} onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)}
     title="Drag to resize" role="separator"
@@ -1969,7 +2103,9 @@ const App = () => {
   const[brainyCollapsed,setBrainyCollapsed]=useState(false);
   const[masterWidth,setMasterWidth]=useState(()=>loadPrefs().masterWidth||260);
   const[brainWidth,setBrainWidth]=useState(()=>loadPrefs().brainWidth||312);
-  useEffect(()=>{savePrefs({...loadPrefs(),masterWidth,brainWidth});},[masterWidth,brainWidth]);
+  const[zoom,setZoom]=useState(()=>loadPrefs().zoom||1);
+  useEffect(()=>{savePrefs({...loadPrefs(),masterWidth,brainWidth,zoom});},[masterWidth,brainWidth,zoom]);
+  const stepZoom=d=>setZoom(z=>Math.min(1.6,Math.max(0.6,Math.round((z+d)*10)/10)));
   const[insights,setInsights]=useState(SAMPLE_INSIGHTS);
   const fileRef=useRef(null);
   const debouncedSaveRef=useRef(debounce(saveState,1200));
@@ -2073,8 +2209,23 @@ const App = () => {
   if(syncEnabled&&!session)return html`<${AuthGate}/>`;
   if(!loaded||!state)return Loading('Loading…');
 
-  const{projects,priorityIds=[],completedExpanded=false,weeksToShow=1}=state;
+  const{projects,priorityIds=[],completedExpanded=false,weeksToShow=1,calendarEvents=[]}=state;
   const upState=p=>setState(s=>({...s,...p}));
+  // Standalone calendar events (not tied to a project); part of synced state.
+  const saveCalendarEvent=ev=>{
+    if(ev.id&&calendarEvents.some(e=>e.id===ev.id))upState({calendarEvents:calendarEvents.map(e=>e.id===ev.id?ev:e)});
+    else upState({calendarEvents:[...calendarEvents,{...ev,id:uid()}]});
+  };
+  const deleteCalendarEvent=id=>upState({calendarEvents:calendarEvents.filter(e=>e.id!==id)});
+  // Move a sticky note from one project to another (drag-and-drop between projects).
+  const moveNote=(note,fromId,toId)=>{
+    if(fromId===toId)return;
+    setState(s=>({...s,projects:s.projects.map(p=>{
+      if(p.id===fromId)return{...p,notes:(p.notes||[]).filter(n=>n.id!==note.id)};
+      if(p.id===toId)return{...p,notes:[...(p.notes||[]),note]};
+      return p;
+    })}));
+  };
   const setWeeks=n=>upState({weeksToShow:n});
   const upProjects=p=>upState({projects:p});
   const upProject=u=>upProjects(projects.map(p=>p.id===u.id?u:p));
@@ -2150,10 +2301,15 @@ const App = () => {
   };
 
   return html`
-    <div style=${{height:'100%',display:'flex',flexDirection:'column',background:'#F4F1ED'}}>
+    <div style=${{zoom,width:`${100/zoom}%`,height:`${100/zoom}%`,display:'flex',flexDirection:'column',background:'#F4F1ED'}}>
       <header style=${{padding:'12px 22px',display:'flex',alignItems:'center',justifyContent:'space-between',borderBottom:'1px solid #EAE4DC',background:'#F4F1ED',flexShrink:0,zIndex:30,gap:10}}>
         <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:21,letterSpacing:'-0.3px',flexShrink:0}}>Planner</div>
-        <div style=${{display:'flex',gap:6,flexWrap:'wrap',justifyContent:'flex-end'}}>
+        <div style=${{display:'flex',gap:6,flexWrap:'wrap',justifyContent:'flex-end',alignItems:'center'}}>
+          <div style=${{display:'flex',alignItems:'center',border:'1px solid #E0D8D0',borderRadius:16,overflow:'hidden'}} title="Zoom — makes everything fit, or larger to read">
+            <button onClick=${()=>stepZoom(-0.1)} title="Zoom out" style=${{background:'none',border:'none',color:'#7A7068',fontSize:15,lineHeight:1,cursor:'pointer',padding:'4px 9px'}}>−</button>
+            <span onClick=${()=>setZoom(1)} title="Reset to 100%" style=${{fontSize:11,color:'#7A7068',minWidth:36,textAlign:'center',cursor:'pointer',userSelect:'none'}}>${Math.round(zoom*100)}%</span>
+            <button onClick=${()=>stepZoom(0.1)} title="Zoom in" style=${{background:'none',border:'none',color:'#7A7068',fontSize:15,lineHeight:1,cursor:'pointer',padding:'4px 9px'}}>+</button>
+          </div>
           <button onClick=${()=>setAddingProject(true)} style=${{background:'#2A2825',color:'#F4F1ED',border:'none',borderRadius:16,padding:'6px 14px',fontSize:12,fontWeight:500,cursor:'pointer'}}>+ Project</button>
           ${pendingAllCount>0&&html`<button onClick=${completeAll}
             title="Archive all completed items across every project to Master Completed"
@@ -2165,6 +2321,9 @@ const App = () => {
             {label:'Print',onClick:()=>{const h=buildPrintHTML(projects,priorityIds,completedExpanded);const w=window.open('','_blank');w.document.write(h);w.document.close();}},
             {label:'Export',onClick:()=>exportBackup(state)},
             {label:'Import',onClick:()=>fileRef.current?.click()},
+            ...(syncEnabled&&session?[passkeyOnThisDevice()
+              ?{label:'🔑 Passkey on (this device)',onClick:()=>{}}
+              :{label:'🔑 Set up a passkey',onClick:()=>{tryRegisterPasskey();}}]:[]),
           ]}/>
           <input ref=${fileRef} type="file" accept=".json" style=${{display:'none'}} onChange=${e=>{const f=e.target.files?.[0];if(f)importBackup(f,s=>{setState(s);setExpandedIds(new Set(s.projects?.map(p=>p.id)||[]));});e.target.value='';}}/>
           ${syncEnabled&&session&&html`<div style=${{display:'flex',alignItems:'center',gap:7,marginLeft:2}}>
@@ -2188,6 +2347,7 @@ const App = () => {
           maxByWindow=${()=>window.innerWidth-(brainyCollapsed?30:brainWidth)-320}/>`}
         <div style=${{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
           <${WeekCalendar} projects=${projects} priorityIds=${priorityIds} weeks=${weeksToShow} onSetWeeks=${setWeeks}
+            calendarEvents=${calendarEvents} onSaveCalendarEvent=${saveCalendarEvent} onDeleteCalendarEvent=${deleteCalendarEvent}
             calCollapsed=${calCollapsed} onToggleCalendar=${()=>setCalCollapsed(p=>!p)}
             onAssignDay=${(tid,day,time,end,kind)=>{
               if(kind==='event'){
@@ -2209,7 +2369,7 @@ const App = () => {
           </div>`}
           ${projects.length===0&&!addingProject&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#B0A898',fontSize:13}}><div style=${{fontSize:26,marginBottom:12,opacity:0.4}}>▤</div>No projects yet — add one above.</div>`}
           <${DraggableProjects} projects=${projects} onReorder=${upProjects}
-            renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow}/>`}/>
+            renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow} onMoveNote=${moveNote}/>`}/>
           </div>
         </div>
         ${!brainyCollapsed&&html`<${PanelResizer} width=${brainWidth} setWidth=${setBrainWidth} dir=${-1} min=${240} max=${600}
