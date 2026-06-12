@@ -1561,7 +1561,7 @@ async function transcribeBlob(blob,name){
   return (await res.json()).text||'';
 }
 
-const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,collapsed,onToggleCollapse}) => {
+const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,onReorder,collapsed,onToggleCollapse}) => {
   const[capture,setCapture]=useState('');
   const[sel,setSel]=useState({}); // insightId -> projectId
   const[imp,setImp]=useState({}); // insightId -> bool (mark important on add)
@@ -1571,6 +1571,10 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
   const[note,setNote]=useState(null); // transient info/error message
   const recRef=useRef(null);
   const fileRef=useRef(null);
+  const fileRef2=useRef(null); // separate upload input for the full-screen overlay
+  const[fullscreen,setFullscreen]=useState(false);
+  const[dragIdx,setDragIdx]=useState(null);
+  const[overIdx,setOverIdx]=useState(null);
   const SR=typeof window!=='undefined'?(window.SpeechRecognition||window.webkitSpeechRecognition):null;
   const projForInsight=ins=>{
     if(sel[ins.id])return sel[ins.id];
@@ -1684,12 +1688,59 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
   };
   useEffect(()=>()=>{try{recRef.current&&recRef.current.stop();}catch(e){}},[]);
 
+  const moveInsight=(from,to)=>{
+    if(from==null||to==null||from===to||!onReorder)return;
+    const arr=[...insights];const[m]=arr.splice(from,1);arr.splice(to,0,m);onReorder(arr);
+  };
+  // Quick-capture card (shared by the sidebar and the full-screen gallery; each gets its own file input).
+  const renderCapture=(fref)=>html`
+    <div style=${{background:'white',border:'1px solid #ECE6DE',borderRadius:12,padding:'11px 12px',marginBottom:14}}>
+      <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6,gap:6}}>
+        <span style=${{fontSize:11,fontWeight:600,color:'#7A7068',flexShrink:0}}>Quick capture</span>
+        <div style=${{display:'flex',alignItems:'center',gap:6}}>
+          <button onClick=${toggleListen} disabled=${!SR}
+            title=${SR?'Live transcribe from your microphone':'Live listen needs Chrome or Edge'}
+            style=${{display:'flex',alignItems:'center',gap:5,border:`1px solid ${listening?'#C7493A':'#E0D8D0'}`,
+              background:listening?'#FCEEEC':'white',color:listening?'#C7493A':(SR?'#7A7068':'#C8C0B8'),
+              borderRadius:14,padding:'3px 9px',fontSize:10.5,fontWeight:500,cursor:SR?'pointer':'not-allowed'}}>
+            <span class=${listening?'brain-rec-dot':''} style=${{width:7,height:7,borderRadius:'50%',background:listening?'#C7493A':'#9A9088',display:'inline-block',flexShrink:0}}/>
+            ${listening?'Listening… stop':'Live listen'}
+          </button>
+          <button onClick=${()=>fref.current&&fref.current.click()} title="Upload an audio file to transcribe (needs deployed backend)"
+            style=${{border:'1px solid #E0D8D0',background:'white',color:'#7A7068',borderRadius:14,padding:'3px 9px',fontSize:10.5,fontWeight:500,cursor:'pointer'}}>🎧 Upload</button>
+          <input ref=${fref} type="file" accept="audio/*" style=${{display:'none'}}
+            onChange=${e=>{const f=e.target.files&&e.target.files[0];if(f)onAudioFile(f);e.target.value='';}}/>
+        </div>
+      </div>
+      <textarea value=${capture} onInput=${e=>setCapture(e.target.value)}
+        placeholder="Paste a Teams recap, jot notes, or use Live listen — one idea per line…"
+        style=${{width:'100%',minHeight:64,resize:'vertical',border:'1px solid #E0D8D0',borderRadius:8,padding:'7px 9px',fontSize:12,color:'#2A2825',background:'#FAFAF8',outline:'none',lineHeight:1.4}}/>
+      <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:8,gap:8}}>
+        <span style=${{fontSize:9.5,color:'#B8B0A6',fontStyle:'italic'}}>${busy?busy:'Summary + to-dos · Brain AI when deployed'}</span>
+        <button onClick=${extract} disabled=${!capture.trim()||!!busy}
+          style=${{background:(capture.trim()&&!busy)?'#2A2825':'#D8D0C8',color:'#F4F1ED',border:'none',borderRadius:8,padding:'6px 12px',fontSize:11.5,fontWeight:500,cursor:(capture.trim()&&!busy)?'pointer':'default',whiteSpace:'nowrap'}}>${busy==='Analyzing…'?'Analyzing…':'Summarize + extract'}</button>
+      </div>
+      ${note&&html`<div style=${{marginTop:8,fontSize:10.5,color:'#9A7A6A',background:'#FBF3EE',border:'1px solid #EADBD0',borderRadius:7,padding:'6px 8px',lineHeight:1.4}}>${note}</div>`}
+    </div>`;
+  const renderCard=(ins)=>html`<${InsightCard} key=${ins.id} insight=${ins} projects=${projects}
+    selectedProjectId=${projForInsight(ins)} onSelectProject=${selectProject}
+    important=${!!imp[ins.id]} onToggleImportant=${toggleImportant}
+    text=${textFor(ins)} onEditText=${editText}
+    onAdd=${onAdd} onAddToNote=${onAddToNote} onDismiss=${onDismiss}/>`;
+  const gripHandle=(i)=>html`<div draggable=${true}
+    onDragStart=${e=>{setDragIdx(i);try{e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',String(i));}catch(_){}}}
+    onDragEnd=${()=>{setDragIdx(null);setOverIdx(null);}} title="Drag to reorder"
+    style=${{display:'flex',alignItems:'center',justifyContent:'center',height:16,cursor:'grab',opacity:0.32,marginBottom:2,userSelect:'none'}}>
+    <svg width="30" height="5" viewBox="0 0 30 5" fill="none"><circle cx="4" cy="2.5" r="1.5" fill="#2A2825"/><circle cx="11" cy="2.5" r="1.5" fill="#2A2825"/><circle cx="19" cy="2.5" r="1.5" fill="#2A2825"/><circle cx="26" cy="2.5" r="1.5" fill="#2A2825"/></svg>
+  </div>`;
+
   if(collapsed)return html`
     <div style=${{width:30,flexShrink:0,borderLeft:'1px solid #EAE4DC',background:'#FAFAF8',position:'relative'}}>
       <button onClick=${onToggleCollapse} style=${{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%) rotate(90deg)',background:'none',border:'none',color:'#9A9088',fontSize:11,cursor:'pointer',whiteSpace:'nowrap',letterSpacing:'0.5px'}}>BRAIN ▸</button>
     </div>`;
 
   return html`
+    <${Fragment}>
     <div style=${{width:312,flexShrink:0,borderLeft:'1px solid #EAE4DC',background:'#F7F5F1',display:'flex',flexDirection:'column'}}>
       <div style=${{padding:'13px 14px 11px',borderBottom:'1px solid #EAE4DC',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
         <div style=${{display:'flex',alignItems:'center',gap:7}}>
@@ -1698,50 +1749,45 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
             <div style=${{fontSize:10,color:'#A8A096',marginTop:1}}>${insights.length} suggestion${insights.length===1?'':'s'} for your planner</div>
           </div>
         </div>
-        <button onClick=${onToggleCollapse} title="Collapse" style=${{background:'none',border:'none',color:'#C0B8B0',fontSize:13,cursor:'pointer'}}>▷</button>
+        <div style=${{display:'flex',alignItems:'center',gap:8,flexShrink:0}}>
+          <button onClick=${()=>setFullscreen(true)} title="Open full screen" style=${{background:'none',border:'none',color:'#9A9088',fontSize:14,cursor:'pointer',lineHeight:1,padding:0}}>⤢</button>
+          <button onClick=${onToggleCollapse} title="Collapse" style=${{background:'none',border:'none',color:'#C0B8B0',fontSize:13,cursor:'pointer'}}>▷</button>
+        </div>
       </div>
 
       <div style=${{flex:1,overflowY:'auto',padding:'12px 13px 20px'}}>
-        <!-- Quick capture -->
-        <div style=${{background:'white',border:'1px solid #ECE6DE',borderRadius:12,padding:'11px 12px',marginBottom:14}}>
-          <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6,gap:6}}>
-            <span style=${{fontSize:11,fontWeight:600,color:'#7A7068',flexShrink:0}}>Quick capture</span>
-            <div style=${{display:'flex',alignItems:'center',gap:6}}>
-              <button onClick=${toggleListen} disabled=${!SR}
-                title=${SR?'Live transcribe from your microphone':'Live listen needs Chrome or Edge'}
-                style=${{display:'flex',alignItems:'center',gap:5,border:`1px solid ${listening?'#C7493A':'#E0D8D0'}`,
-                  background:listening?'#FCEEEC':'white',color:listening?'#C7493A':(SR?'#7A7068':'#C8C0B8'),
-                  borderRadius:14,padding:'3px 9px',fontSize:10.5,fontWeight:500,cursor:SR?'pointer':'not-allowed'}}>
-                <span class=${listening?'brain-rec-dot':''} style=${{width:7,height:7,borderRadius:'50%',background:listening?'#C7493A':'#9A9088',display:'inline-block',flexShrink:0}}/>
-                ${listening?'Listening… stop':'Live listen'}
-              </button>
-              <button onClick=${()=>fileRef.current&&fileRef.current.click()} title="Upload an audio file to transcribe (needs deployed backend)"
-                style=${{border:'1px solid #E0D8D0',background:'white',color:'#7A7068',borderRadius:14,padding:'3px 9px',fontSize:10.5,fontWeight:500,cursor:'pointer'}}>🎧 Upload</button>
-              <input ref=${fileRef} type="file" accept="audio/*" style=${{display:'none'}}
-                onChange=${e=>{const f=e.target.files&&e.target.files[0];if(f)onAudioFile(f);e.target.value='';}}/>
-            </div>
-          </div>
-          <textarea value=${capture} onInput=${e=>setCapture(e.target.value)}
-            placeholder="Paste a Teams recap, jot notes, or use Live listen — one idea per line…"
-            style=${{width:'100%',minHeight:64,resize:'vertical',border:'1px solid #E0D8D0',borderRadius:8,padding:'7px 9px',fontSize:12,color:'#2A2825',background:'#FAFAF8',outline:'none',lineHeight:1.4}}/>
-          <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:8,gap:8}}>
-            <span style=${{fontSize:9.5,color:'#B8B0A6',fontStyle:'italic'}}>${busy?busy:'Summary + to-dos · Brain AI when deployed'}</span>
-            <button onClick=${extract} disabled=${!capture.trim()||!!busy}
-              style=${{background:(capture.trim()&&!busy)?'#2A2825':'#D8D0C8',color:'#F4F1ED',border:'none',borderRadius:8,padding:'6px 12px',fontSize:11.5,fontWeight:500,cursor:(capture.trim()&&!busy)?'pointer':'default',whiteSpace:'nowrap'}}>${busy==='Analyzing…'?'Analyzing…':'Summarize + extract'}</button>
-          </div>
-          ${note&&html`<div style=${{marginTop:8,fontSize:10.5,color:'#9A7A6A',background:'#FBF3EE',border:'1px solid #EADBD0',borderRadius:7,padding:'6px 8px',lineHeight:1.4}}>${note}</div>`}
-        </div>
-
+        ${renderCapture(fileRef)}
         <div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',fontWeight:600,marginBottom:9,paddingLeft:2}}>Suggested for you</div>
         ${insights.length===0
           ?html`<div style=${{textAlign:'center',padding:'24px 12px',color:'#B8B0A6',fontSize:12,lineHeight:1.7}}>All caught up.<br/>Capture notes above and Brainy will surface to-dos here.</div>`
-          :insights.map(ins=>html`<${InsightCard} key=${ins.id} insight=${ins} projects=${projects}
-              selectedProjectId=${projForInsight(ins)} onSelectProject=${selectProject}
-              important=${!!imp[ins.id]} onToggleImportant=${toggleImportant}
-              text=${textFor(ins)} onEditText=${editText}
-              onAdd=${onAdd} onAddToNote=${onAddToNote} onDismiss=${onDismiss}/>`)}
+          :insights.map(renderCard)}
       </div>
-    </div>`;
+    </div>
+    ${fullscreen&&html`
+      <div style=${{position:'fixed',inset:0,zIndex:4000,background:'#F4F1ED',display:'flex',flexDirection:'column'}}>
+        <div style=${{padding:'14px 22px',borderBottom:'1px solid #EAE4DC',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+          <div style=${{display:'flex',alignItems:'baseline',gap:10}}>
+            <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:20}}>Brain</div>
+            <div style=${{fontSize:11,color:'#A8A096'}}>${insights.length} suggestion${insights.length===1?'':'s'} · drag the handle above a card to reorder</div>
+          </div>
+          <button onClick=${()=>setFullscreen(false)} title="Close full screen" style=${{background:'#F0EBE5',border:'none',borderRadius:8,padding:'7px 14px',fontSize:12,fontWeight:500,cursor:'pointer',color:'#2A2825'}}>✕ Close</button>
+        </div>
+        <div style=${{flex:1,overflowY:'auto',padding:'18px 22px 48px'}}>
+          <div style=${{maxWidth:560,margin:'0 auto 20px'}}>${renderCapture(fileRef2)}</div>
+          ${insights.length===0
+            ?html`<div style=${{textAlign:'center',padding:'48px 20px',color:'#B8B0A6',fontSize:13}}>All caught up. Capture notes above to surface to-dos.</div>`
+            :html`<div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(300px,1fr))',gap:14,alignItems:'start'}}>
+              ${insights.map((ins,i)=>html`<div key=${ins.id}
+                onDragOver=${e=>{e.preventDefault();if(overIdx!==i)setOverIdx(i);}}
+                onDrop=${e=>{e.preventDefault();moveInsight(dragIdx,i);setDragIdx(null);setOverIdx(null);}}
+                style=${{borderRadius:14,outline:(overIdx===i&&dragIdx!=null&&dragIdx!==i)?'2px dashed #C8B8A2':'none',outlineOffset:3,opacity:dragIdx===i?0.4:1,transition:'opacity 0.12s'}}>
+                ${gripHandle(i)}
+                ${renderCard(ins)}
+              </div>`)}
+            </div>`}
+        </div>
+      </div>`}
+    <//>`;
 };
 
 /* ── Root App ──────────────────────────────────────────────── */
@@ -1922,6 +1968,7 @@ const App = () => {
         </div>
         <${BrainySidebar} insights=${insights} projects=${projects}
           onAdd=${addInsightToPlanner} onAddToNote=${addInsightToExistingNote} onDismiss=${dismissInsight} onCapture=${addCapturedInsights}
+          onReorder=${setInsights}
           collapsed=${brainyCollapsed} onToggleCollapse=${()=>setBrainyCollapsed(p=>!p)}/>
       </div>
     </div>`;
