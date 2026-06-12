@@ -286,6 +286,12 @@ const purgeOldCompleted=s=>{
   return{...s,projects,priorityIds:(s.priorityIds||[]).filter(id=>liveIds.has(id))};
 };
 
+/* Tasks, reminders, and events share one shape and one set of operations;
+   `kind` selects the project array they live in. */
+const KIND_KEY={task:'tasks',reminder:'reminders',event:'events'};
+const sortDoneLast=list=>[...list.filter(i=>!i.done),...list.filter(i=>i.done)];
+const toggleDonePatch=it=>({done:!it.done,completedAt:!it.done?Date.now():null});
+
 /* ── Confirm Dialog ────────────────────────────────────────── */
 const ConfirmDialog = ({message,confirmLabel='Delete',onConfirm,onCancel}) => html`
   <div style=${{position:'fixed',inset:0,zIndex:3000,background:'rgba(42,40,37,0.5)',display:'flex',alignItems:'center',justifyContent:'center'}} onClick=${onCancel}>
@@ -762,7 +768,7 @@ const ItemRow = ({item,kind='task',highlighted=false,onToggleDone,onToggleHighli
 };
 
 /* ── Project Strip ─────────────────────────────────────────── */
-const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds,onTogglePriority,masterCollapsed,openColorPickerId,setOpenColorPickerId,weeks=1,onMoveNote,onCopyCopilot}) => {
+const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds,onTogglePriority,masterCollapsed,openColorPickerId,setOpenColorPickerId,weeks=1,onMoveNote,onCopyCopilot,onPatchItem,onAddItem,onRemoveItem,onSetSchedule}) => {
   const[newTask,setNewTask]=useState('');
   const[newReminder,setNewReminder]=useState('');
   const[newEvent,setNewEvent]=useState('');
@@ -783,27 +789,23 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
   const isColorOpen=openColorPickerId===project.id;
   useEffect(()=>{if(editingName)nameInputRef.current?.focus();},[editingName]);
 
-  const updateTasks=t=>onUpdate({...project,tasks:t});
-  const updateReminders=r=>onUpdate({...project,reminders:r});
   const updateNotes=n=>onUpdate({...project,notes:n});
-  const addTask=()=>{const{text,due}=extractDue(newTask);if(!text)return;updateTasks([...project.tasks,{id:uid(),text,done:false,...(due?{dueDate:due}:{})}]);setNewTask('');};
-  const toggleDone=id=>{const tasks=project.tasks.map(t=>t.id===id?{...t,done:!t.done,completedAt:!t.done?Date.now():null}:t);updateTasks([...tasks.filter(t=>!t.done),...tasks.filter(t=>t.done)]);};
-  const deleteTask=id=>updateTasks(project.tasks.filter(t=>t.id!==id));
-  const editTask=(id,text)=>updateTasks(project.tasks.map(t=>t.id===id?{...t,text}:t));
-  const assignDay=(id,day,time,end)=>updateTasks(project.tasks.map(t=>t.id===id?{...t,dueDate:day,taskTime:time,endTime:end}:t));
-  const addReminder=()=>{const{text,due}=extractDue(newReminder);if(!text)return;updateReminders([...(project.reminders||[]),{id:uid(),text,done:false,flagged:false,...(due?{dueDate:due}:{})}]);setNewReminder('');};
-  const toggleReminderDone=id=>{const r=(project.reminders||[]).map(x=>x.id===id?{...x,done:!x.done,completedAt:!x.done?Date.now():null}:x);updateReminders([...r.filter(x=>!x.done),...r.filter(x=>x.done)]);};
-  const toggleReminderFlag=id=>updateReminders((project.reminders||[]).map(r=>r.id===id?{...r,flagged:!r.flagged}:r));
-  const deleteReminder=id=>updateReminders((project.reminders||[]).filter(r=>r.id!==id));
-  const editReminder=(id,text)=>updateReminders((project.reminders||[]).map(r=>r.id===id?{...r,text}:r));
-  const updateEvents=ev=>onUpdate({...project,events:ev});
-  const addEvent=(raw)=>{const{text,due}=extractDue(raw||'');if(!text)return;updateEvents([...(project.events||[]),{id:uid(),text,done:false,important:false,dueDate:due,taskTime:null,endTime:null}]);};
-  const toggleEventDone=id=>{const ev=(project.events||[]).map(e=>e.id===id?{...e,done:!e.done,completedAt:!e.done?Date.now():null}:e);updateEvents([...ev.filter(e=>!e.done),...ev.filter(e=>e.done)]);};
-  const deleteEvent=id=>updateEvents((project.events||[]).filter(e=>e.id!==id));
-  const editEvent=(id,text)=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,text}:e));
-  const toggleEventImportant=id=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,important:!e.important}:e));
-  const assignEventDay=(id,day,time,end,endDate=null)=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,dueDate:day,taskTime:time,endTime:end,endDate}:e));
-  const assignReminderDay=(id,day,time,end)=>updateReminders((project.reminders||[]).map(r=>r.id===id?{...r,dueDate:day,taskTime:time,endTime:end}:r));
+  // Item CRUD is thin sugar over the App-level generics (see patchItem).
+  const pid=project.id;
+  const addTask=()=>{const{text,due}=extractDue(newTask);if(!text)return;onAddItem(pid,'task',{text,...(due?{dueDate:due}:{})});setNewTask('');};
+  const toggleDone=id=>onPatchItem(pid,'task',id,toggleDonePatch,true);
+  const deleteTask=id=>onRemoveItem(pid,'task',id);
+  const editTask=(id,text)=>onPatchItem(pid,'task',id,{text});
+  const addReminder=()=>{const{text,due}=extractDue(newReminder);if(!text)return;onAddItem(pid,'reminder',{text,flagged:false,...(due?{dueDate:due}:{})});setNewReminder('');};
+  const toggleReminderDone=id=>onPatchItem(pid,'reminder',id,toggleDonePatch,true);
+  const toggleReminderFlag=id=>onPatchItem(pid,'reminder',id,r=>({flagged:!r.flagged}));
+  const deleteReminder=id=>onRemoveItem(pid,'reminder',id);
+  const editReminder=(id,text)=>onPatchItem(pid,'reminder',id,{text});
+  const addEvent=raw=>{const{text,due}=extractDue(raw||'');if(!text)return;onAddItem(pid,'event',{text,important:false,dueDate:due,taskTime:null,endTime:null});};
+  const toggleEventDone=id=>onPatchItem(pid,'event',id,toggleDonePatch,true);
+  const deleteEvent=id=>onRemoveItem(pid,'event',id);
+  const editEvent=(id,text)=>onPatchItem(pid,'event',id,{text});
+  const toggleEventImportant=id=>onPatchItem(pid,'event',id,e=>({important:!e.important}));
   const addNote=()=>updateNotes([...project.notes,{id:uid(),title:'',text:'',color:defaultNoteColor(project.color),gradientStep:null,checklistItems:[],collapsed:false}]);
   const updateNote=u=>updateNotes(project.notes.map(n=>n.id===u.id?u:n));
   const deleteNote=id=>updateNotes(project.notes.filter(n=>n.id!==id));
@@ -956,16 +958,12 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
       </div>
       ${eventPickerData&&html`<div style=${{position:'fixed',top:eventPickerData.top,left:eventPickerData.left,zIndex:9999}}>
         <${DayTimePicker} task=${eventPickerData.event} isEvent=${true} weeks=${weeks}
-          onAssign=${(day,time,end,endDate)=>{assignEventDay(eventPickerData.event.id,day,time,end,endDate);setEventPickerData(null);}}
+          onAssign=${(day,time,end,endDate)=>{onSetSchedule(pid,'event',eventPickerData.event.id,day,time,end,endDate);setEventPickerData(null);}}
           onClose=${()=>setEventPickerData(null)}/>
       </div>`}
       ${itemPickerData&&html`<div style=${{position:'fixed',top:itemPickerData.top,left:itemPickerData.left,zIndex:9999}}>
         <${DayTimePicker} task=${itemPickerData.item} weeks=${weeks}
-          onAssign=${(day,time,end)=>{
-            if(itemPickerData.kind==='task')assignDay(itemPickerData.item.id,day,time,end);
-            else assignReminderDay(itemPickerData.item.id,day,time,end);
-            setItemPickerData(null);
-          }}
+          onAssign=${(day,time,end)=>{onSetSchedule(pid,itemPickerData.kind,itemPickerData.item.id,day,time,end);setItemPickerData(null);}}
           onClose=${()=>setItemPickerData(null)}/>
       </div>`}
     <//>`;
@@ -1025,7 +1023,7 @@ const DraggableProjects = ({projects,onReorder,renderProject}) => {
 
 /* ── Master Panel ──────────────────────────────────────────── */
 /* ── Master Item (top-level to prevent remount on every render) ── */
-const MasterItem = ({item,onToggleDone,onToggleReminderDone,onToggleEventDone,onTogglePriority,onAssignDay,priorityIds,weeks=1}) => {
+const MasterItem = ({item,onToggle,onTogglePriority,onAssignDay,priorityIds,weeks=1}) => {
   const[hov,setHov]=useState(false);
   const[showPicker,setShowPicker]=useState(false);
   const[pickerPos,setPickerPos]=useState({top:0,left:0});
@@ -1042,10 +1040,7 @@ const MasterItem = ({item,onToggleDone,onToggleReminderDone,onToggleEventDone,on
     <${Fragment}>
     <div onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)}
       style=${{display:'flex',alignItems:'center',gap:6,padding:'5px 10px',borderRadius:6,background:hov?'rgba(0,0,0,0.025)':'transparent',transition:'background 0.12s',userSelect:'none'}}>
-      <div onClick=${()=>item.kind==='event'?(onToggleEventDone&&onToggleEventDone(item.projectId,item.id)):item.kind==='reminder'?onToggleReminderDone(item.projectId,item.id):onToggleDone(item.projectId,item.id)}
-        style=${{width:14,height:14,borderRadius:3,flexShrink:0,cursor:'pointer',border:item.done?`2px solid ${item.projectColor}`:'1.5px solid #C8C0B8',background:item.done?item.projectColor:'white',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s'}}>
-        ${item.done&&html`<svg width="7" height="6" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`}
-      </div>
+      <${Checkbox} checked=${item.done} color=${item.projectColor} size=${14} onClick=${()=>onToggle(item.projectId,item.kind,item.id)}/>
       <div style=${{width:6,height:6,borderRadius:'50%',background:item.projectColor,flexShrink:0}}/>
       <span style=${{flex:1,fontSize:12,textDecoration:item.done?'line-through':'none',color:item.done?'#B0A898':'#2A2825',lineHeight:1.3}}>${item.text}</span>
       ${item.dueDate&&!item.done&&item.dueDate<todayISO()&&html`<span title="Was due ${isoToLong(item.dueDate)}" style=${{flexShrink:0,fontSize:9.5,fontWeight:600,color:'#C7493A',background:'rgba(199,73,58,0.12)',borderRadius:4,padding:'1px 5px',marginRight:2}}>${isoToMDY(item.dueDate)}</span>`}
@@ -1065,12 +1060,12 @@ const MasterItem = ({item,onToggleDone,onToggleReminderDone,onToggleEventDone,on
       </div>
     </div>
     ${showPicker&&html`<div style=${{position:'fixed',top:pickerPos.top,left:pickerPos.left,zIndex:3000}}>
-      <${DayTimePicker} task=${item} weeks=${weeks} onAssign=${(day,time,end)=>{onAssignDay(item.projectId,item.id,day,time,end);setShowPicker(false);}} onClose=${()=>setShowPicker(false)}/>
+      <${DayTimePicker} task=${item} weeks=${weeks} onAssign=${(day,time,end)=>{onAssignDay(item.projectId,item.kind,item.id,day,time,end);setShowPicker(false);}} onClose=${()=>setShowPicker(false)}/>
     </div>`}
     <//>`;
 };
 
-const MasterPanel = ({projects,priorityIds,onToggleDone,onTogglePriority,onToggleReminderDone,onToggleEventDone,onAssignDay,onReorderPriority,onEmptyCompleted,completedExpanded,onToggleCompleted,collapsed,onToggleCollapse,weeks=1,width=260}) => {
+const MasterPanel = ({projects,priorityIds,onToggle,onTogglePriority,onAssignDay,onReorderPriority,onEmptyCompleted,completedExpanded,onToggleCompleted,collapsed,onToggleCollapse,weeks=1,width=260}) => {
   const[confirmEmpty,setConfirmEmpty]=useState(false);
   const[priDragOver,setPriDragOver]=useState(null);
   const priDragId=useRef(null);
@@ -1106,7 +1101,7 @@ const MasterPanel = ({projects,priorityIds,onToggleDone,onTogglePriority,onToggl
         ${overdueItems.length>0&&html`<div style=${{marginBottom:8}}>
           <div style=${{padding:'5px 14px 2px',fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#C7493A',fontWeight:600}}>⚠ Overdue (${overdueItems.length})</div>
           ${overdueItems.map(it=>html`<div key=${it.id} style=${{borderLeft:'3px solid #C7493A',marginBottom:1,background:'rgba(199,73,58,0.05)'}}>
-            <${MasterItem} item=${it} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>
+            <${MasterItem} item=${it} onToggle=${onToggle} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>
           </div>`)}
         </div>`}
         ${priTasks.length>0&&html`<div style=${{marginBottom:8}}>
@@ -1114,19 +1109,19 @@ const MasterPanel = ({projects,priorityIds,onToggleDone,onTogglePriority,onToggl
           ${priTasks.map(task=>html`
             <div key=${task.id} draggable onDragStart=${e=>{priDragId.current=task.id;e.dataTransfer.effectAllowed='move';}} onDragOver=${e=>{e.preventDefault();setPriDragOver(task.id);}} onDrop=${e=>{e.preventDefault();setPriDragOver(null);if(priDragId.current&&priDragId.current!==task.id)onReorderPriority(priDragId.current,task.id);priDragId.current=null;}}
               style=${{borderLeft:`3px solid ${PRIORITY_COLOR}`,marginBottom:1,cursor:'grab',background:priDragOver===task.id?'rgba(212,117,138,0.07)':'rgba(212,117,138,0.03)'}}>
-              <${MasterItem} item=${task} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>
+              <${MasterItem} item=${task} onToggle=${onToggle} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>
             </div>`)}
         </div>`}
         ${flaggedReminders.length>0&&html`<div style=${{marginBottom:8}}>
           <div style=${{padding:'5px 14px 2px',fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:REMINDER_COLOR,fontWeight:600}}>⚑ Reminders</div>
-          ${flaggedReminders.map(r=>html`<div key=${r.id} style=${{borderLeft:`3px solid ${REMINDER_COLOR}`,marginBottom:1,background:'rgba(91,143,191,0.03)'}}><${MasterItem} item=${r} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/></div>`)}
+          ${flaggedReminders.map(r=>html`<div key=${r.id} style=${{borderLeft:`3px solid ${REMINDER_COLOR}`,marginBottom:1,background:'rgba(91,143,191,0.03)'}}><${MasterItem} item=${r} onToggle=${onToggle} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/></div>`)}
         </div>`}
         ${normalGroups.map(p=>html`<div key=${p.id} style=${{marginBottom:10}}>
           <div style=${{display:'flex',alignItems:'center',gap:6,padding:'5px 14px 2px'}}>
             <div style=${{width:6,height:6,borderRadius:'50%',background:p.color,flexShrink:0}}/>
             <span style=${{fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.7px',color:'#9A9088'}}>${p.name}</span>
           </div>
-          ${p.masterTasks.map(task=>html`<${MasterItem} key=${task.id} item=${{...task,kind:'task',projectId:p.id,projectName:p.name,projectColor:p.color}} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>`)}
+          ${p.masterTasks.map(task=>html`<${MasterItem} key=${task.id} item=${{...task,kind:'task',projectId:p.id,projectName:p.name,projectColor:p.color}} onToggle=${onToggle} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>`)}
         </div>`)}
         ${allTasks.length===0&&flaggedReminders.length===0&&completedItems.length===0&&html`
           <div style=${{padding:'28px 14px',color:'#C0B8B0',fontSize:12,textAlign:'center',lineHeight:1.8,fontStyle:'italic'}}>All tasks appear here automatically.<br/>Tap ☆ to mark priority.<br/>Flag ⚑ reminders to surface them here.</div>`}
@@ -1140,7 +1135,7 @@ const MasterPanel = ({projects,priorityIds,onToggleDone,onTogglePriority,onToggl
             </button>
             ${completedExpanded&&html`<button onClick=${()=>setConfirmEmpty(true)} style=${{background:'none',border:'none',cursor:'pointer',fontSize:11,color:'#C0B8B0',textDecoration:'underline',textUnderlineOffset:2,padding:0}}>Empty</button>`}
           </div>
-          ${completedExpanded&&completedItems.map(item=>html`<${MasterItem} key=${item.id} item=${item} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>`)}
+          ${completedExpanded&&completedItems.map(item=>html`<${MasterItem} key=${item.id} item=${item} onToggle=${onToggle} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>`)}
         </div>`}
       </div>
       ${confirmEmpty&&html`<${ConfirmDialog} message="This will permanently delete all completed tasks and reminders from all projects." confirmLabel="Empty" onConfirm=${()=>{setConfirmEmpty(false);onEmptyCompleted();}} onCancel=${()=>setConfirmEmpty(false)}/>`}
@@ -2395,6 +2390,31 @@ const App = () => {
   const setWeeks=n=>upState({weeksToShow:n});
   const upProjects=p=>upState({projects:p});
   const upProject=u=>upProjects(projects.map(p=>p.id===u.id?u:p));
+  /* Generic item CRUD — the single choke point every task/reminder/event
+     mutation goes through (project rows, master list, calendar, pickers). */
+  const patchItem=(pid,kind,id,patch,resort=false)=>setState(s=>({...s,projects:s.projects.map(p=>{
+    if(p.id!==pid)return p;
+    const key=KIND_KEY[kind];
+    let list=(p[key]||[]).map(it=>it.id===id?{...it,...(typeof patch==='function'?patch(it):patch)}:it);
+    if(resort)list=sortDoneLast(list);
+    return{...p,[key]:list};
+  })}));
+  const addItem=(pid,kind,item)=>setState(s=>({...s,projects:s.projects.map(p=>p.id===pid?{...p,[KIND_KEY[kind]]:[...(p[KIND_KEY[kind]]||[]),{id:uid(),done:false,...item}]}:p)}));
+  const removeItem=(pid,kind,id)=>setState(s=>({...s,projects:s.projects.map(p=>p.id===pid?{...p,[KIND_KEY[kind]]:(p[KIND_KEY[kind]]||[]).filter(i=>i.id!==id)}:p)}));
+  const findOwner=(kind,id)=>projects.find(p=>(p[KIND_KEY[kind]]||[]).some(i=>i.id===id));
+  /* One schedule writer for every entry point. For events, an explicit
+     endDate (including null) is honored; omitting it shifts an existing
+     span to keep its length (day-to-day calendar drags). */
+  const setSchedule=(pid,kind,id,day,time,end,endDate)=>patchItem(pid,kind,id,it=>{
+    if(kind!=='event')return{dueDate:day,taskTime:time,endTime:end};
+    const ne=endDate!==undefined?endDate
+      :(it.endDate&&it.dueDate&&day)
+        ?new Date(new Date(day).getTime()+(new Date(it.endDate).getTime()-new Date(it.dueDate).getTime())).toISOString().slice(0,10)
+        :null;
+    return{dueDate:day,taskTime:time,endTime:end,endDate:ne};
+  });
+  // Master-list toggle also un-archives (the Completed section lives there).
+  const masterToggle=(pid,kind,id)=>patchItem(pid,kind,id,it=>({...toggleDonePatch(it),archived:false}),true);
   const delProject=id=>{
     setState(s=>({...s,projects:s.projects.filter(p=>p.id!==id),collapsedIds:(s.collapsedIds||[]).filter(x=>x!==id)}));
     setExpandedIds(prev=>{const n=new Set(prev);n.delete(id);return n;});
@@ -2422,21 +2442,9 @@ const App = () => {
     setExpandedIds(prev=>prev.has(id)?prev:new Set([...prev,id]));
     setState(s=>(s.collapsedIds||[]).includes(id)?{...s,collapsedIds:s.collapsedIds.filter(x=>x!==id)}:s);
   };
-  const masterToggleDone=(pid,tid)=>upProjects(projects.map(p=>{if(p.id!==pid)return p;const tasks=p.tasks.map(t=>t.id===tid?{...t,done:!t.done,archived:false,completedAt:!t.done?Date.now():null}:t);return{...p,tasks:[...tasks.filter(t=>!t.done),...tasks.filter(t=>t.done)]};}));
-  const masterToggleReminderDone=(pid,rid)=>upProjects(projects.map(p=>{if(p.id!==pid)return p;const reminders=(p.reminders||[]).map(r=>r.id===rid?{...r,done:!r.done,archived:false,completedAt:!r.done?Date.now():null}:r);return{...p,reminders:[...reminders.filter(r=>!r.done),...reminders.filter(r=>r.done)]};}));
-  const masterToggleEventDone=(pid,eid)=>upProjects(projects.map(p=>{if(p.id!==pid)return p;const events=(p.events||[]).map(e=>e.id===eid?{...e,done:!e.done,archived:false,completedAt:!e.done?Date.now():null}:e);return{...p,events:[...events.filter(e=>!e.done),...events.filter(e=>e.done)]};}));
   const togglePriority=tid=>{const a=priorityIds.includes(tid);upState({priorityIds:a?priorityIds.filter(x=>x!==tid):[...priorityIds,tid]});};
   const reorderPriority=(fromId,toId)=>{const a=[...priorityIds];const fi=a.indexOf(fromId),ti=a.indexOf(toId);if(fi!==-1&&ti!==-1){[a[fi],a[ti]]=[a[ti],a[fi]];upState({priorityIds:a});}};
   const emptyCompleted=()=>{setState(s=>{const projects=s.projects.map(p=>({...p,tasks:p.tasks.filter(t=>!t.archived),reminders:(p.reminders||[]).filter(r=>!r.archived),events:(p.events||[]).filter(e=>!e.archived)}));const liveIds=new Set(projects.flatMap(p=>p.tasks.map(t=>t.id)));return{...s,projects,priorityIds:s.priorityIds.filter(id=>liveIds.has(id))};});};
-  const assignDayToTask=(pid,tid,day,time,end)=>upProjects(projects.map(p=>p.id===pid?{...p,tasks:p.tasks.map(t=>t.id===tid?{...t,dueDate:day,taskTime:time,endTime:end}:t)}:p));
-  // Master-list assign: route to tasks OR reminders by which list the id belongs to.
-  const assignDayFromMaster=(pid,id,day,time,end)=>upProjects(projects.map(p=>{
-    if(p.id!==pid)return p;
-    if(p.tasks.some(t=>t.id===id))return{...p,tasks:p.tasks.map(t=>t.id===id?{...t,dueDate:day,taskTime:time,endTime:end}:t)};
-    if((p.reminders||[]).some(r=>r.id===id))return{...p,reminders:(p.reminders||[]).map(r=>r.id===id?{...r,dueDate:day,taskTime:time,endTime:end}:r)};
-    return p;
-  }));
-
   /* ── Brainy → Planner bridge ──────────────────────────────────
      This is the integration: a suggestion becomes a real planner
      item (tagged fromBrainy) and immediately flows everywhere the
@@ -2525,12 +2533,11 @@ const App = () => {
       </header>
       <div style=${{flex:1,display:'flex',overflow:'hidden',zoom}}>
         <${MasterPanel} projects=${projects} priorityIds=${priorityIds}
-          onToggleDone=${masterToggleDone} onTogglePriority=${togglePriority}
-          onToggleReminderDone=${masterToggleReminderDone} onToggleEventDone=${masterToggleEventDone}
+          onToggle=${masterToggle} onTogglePriority=${togglePriority}
           onReorderPriority=${reorderPriority} onEmptyCompleted=${emptyCompleted}
           completedExpanded=${completedExpanded}
           onToggleCompleted=${()=>upState({completedExpanded:!completedExpanded})}
-          onAssignDay=${assignDayFromMaster} weeks=${weeksToShow}
+          onAssignDay=${setSchedule} weeks=${weeksToShow}
           collapsed=${masterCollapsed} onToggleCollapse=${()=>setMasterCollapsed(p=>!p)} width=${masterWidth}/>
         ${!masterCollapsed&&html`<${PanelResizer} width=${masterWidth} setWidth=${setMasterWidth} dir=${1} min=${180} max=${560} zoom=${zoom}
           maxByWindow=${()=>window.innerWidth/zoom-(brainyCollapsed?30:brainWidth)-320}/>`}
@@ -2539,26 +2546,9 @@ const App = () => {
             calendarEvents=${calendarEvents} onSaveCalendarEvent=${saveCalendarEvent} onDeleteCalendarEvent=${deleteCalendarEvent}
             calCollapsed=${calCollapsed} onToggleCalendar=${()=>setCalCollapsed(p=>!p)}
             calHeight=${calHeight} onSetCalHeight=${setCalHeight} zoom=${zoom}
-            onAssignDay=${(tid,day,time,end,kind,endDate)=>{
-              if(kind==='event'){
-                const proj=projects.find(p=>(p.events||[]).some(e=>e.id===tid));
-                if(proj)upProjects(projects.map(p=>p.id===proj.id?{...p,events:(p.events||[]).map(e=>{
-                  if(e.id!==tid)return e;
-                  // Picker passes an explicit last day (or null to clear); a
-                  // day-to-day drag omits it — shift the span to keep its length.
-                  const ne=endDate!==undefined?endDate
-                    :(e.endDate&&e.dueDate&&day)
-                      ?new Date(new Date(day).getTime()+(new Date(e.endDate).getTime()-new Date(e.dueDate).getTime())).toISOString().slice(0,10)
-                      :null;
-                  return{...e,dueDate:day,taskTime:time,endTime:end,endDate:ne};
-                })}:p));
-              } else if(kind==='reminder'){
-                const proj=projects.find(p=>(p.reminders||[]).some(r=>r.id===tid));
-                if(proj)upProjects(projects.map(p=>p.id===proj.id?{...p,reminders:(p.reminders||[]).map(r=>r.id===tid?{...r,dueDate:day,taskTime:time,endTime:end}:r)}:p));
-              } else {
-                const proj=projects.find(p=>p.tasks.some(t=>t.id===tid));
-                if(proj)assignDayToTask(proj.id,tid,day,time,end);
-              }
+            onAssignDay=${(id,day,time,end,kind,endDate)=>{
+              const proj=findOwner(kind||'task',id);
+              if(proj)setSchedule(proj.id,kind||'task',id,day,time,end,endDate);
             }}/>
           <div style=${{flex:1,overflowY:'auto',overflowX:'hidden',padding:'16px 20px 40px'}}>
           ${addingProject&&html`<div style=${{background:'white',borderRadius:14,padding:'11px 15px',display:'flex',gap:10,alignItems:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.07)',border:'1.5px solid #2A2825',marginBottom:12}}>
@@ -2568,7 +2558,7 @@ const App = () => {
           </div>`}
           ${projects.length===0&&!addingProject&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#B0A898',fontSize:13}}><div style=${{fontSize:26,marginBottom:12,opacity:0.4}}>▤</div>No projects yet — add one above.</div>`}
           <${DraggableProjects} projects=${projects} onReorder=${upProjects}
-            renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow} onMoveNote=${moveNote} onCopyCopilot=${()=>copyTextToClipboard(buildCopilotText(state,[p.id]))}/>`}/>
+            renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow} onMoveNote=${moveNote} onCopyCopilot=${()=>copyTextToClipboard(buildCopilotText(state,[p.id]))} onPatchItem=${patchItem} onAddItem=${addItem} onRemoveItem=${removeItem} onSetSchedule=${setSchedule}/>`}/>
           </div>
         </div>
         ${!brainyCollapsed&&html`<${PanelResizer} width=${brainWidth} setWidth=${setBrainWidth} dir=${-1} min=${240} max=${600} zoom=${zoom}
