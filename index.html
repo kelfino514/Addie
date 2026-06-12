@@ -35,6 +35,9 @@ const html = htm.bind(h);
 /* ── Utilities ─────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2,10);
 const debounce = (fn,ms) => { let t; return (...a) => { clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; };
+// Lowercased word tokens, for fuzzy matching insight text to a project.
+const STOPWORDS=new Set(['the','and','for','with','from','this','that','your','about','into','need','make','sure','will','have','has','out','off','get','got','set','use','via','per','due','any','all','new','one','two','was','are','not','but','can','our','their','them','then','than','also','before','after','next','some']);
+const tokenize=s=>(s||'').toLowerCase().match(/[a-z0-9]+/g)||[];
 
 /* ── Color helpers ─────────────────────────────────────────── */
 function hexToHsl(hex){
@@ -1684,10 +1687,27 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
   const[dragIdx,setDragIdx]=useState(null);
   const[overIdx,setOverIdx]=useState(null);
   const SR=typeof window!=='undefined'?(window.SpeechRecognition||window.webkitSpeechRecognition):null;
+  // Best-guess project: infer from the insight text by matching its words against
+  // each project's name (weighted) and its existing items/notes.
+  const guessProject=ins=>{
+    const words=new Set(tokenize(ins.text).filter(w=>w.length>=3&&!STOPWORDS.has(w)));
+    if(!words.size)return null;
+    let bestId=null,bestScore=0;
+    for(const p of projects){
+      let score=0;
+      for(const w of tokenize(p.name))if(w.length>=3&&!STOPWORDS.has(w)&&words.has(w))score+=3;
+      const blob=[...(p.tasks||[]),...(p.reminders||[]),...(p.events||[])].map(it=>it.text).join(' ')+' '+(p.notes||[]).map(n=>(n.title||'')+' '+(n.text||'')).join(' ');
+      const toks=new Set(tokenize(blob));
+      for(const w of words)if(toks.has(w))score+=1;
+      if(score>bestScore){bestScore=score;bestId=p.id;}
+    }
+    return bestScore>0?bestId:null;
+  };
   const projForInsight=ins=>{
     if(sel[ins.id])return sel[ins.id];
-    const m=projects.find(p=>p.name===ins.suggestProject);
-    return m?m.id:(projects[0]&&projects[0].id);
+    const m=projects.find(p=>p.name===ins.suggestProject); // explicit suggestion (sample data)
+    if(m)return m.id;
+    return guessProject(ins)||(projects[0]&&projects[0].id);
   };
   const selectProject=(id,pid)=>setSel(s=>({...s,[id]:pid}));
   const toggleImportant=id=>setImp(s=>({...s,[id]:!s[id]}));
