@@ -65,6 +65,9 @@ const generateGradientScale = (hex,steps=6) => {
 };
 const darken = hex => { try{const[h,s,l]=hexToHsl(hex);return hslToHex(h,s,Math.max(15,l-35));}catch{return'#555';} };
 const isLight = hex => { try{const[,,l]=hexToHsl(hex);return l>60;}catch{return true;} };
+/* A light but clearly-hued tint of a project color — used to color scheduled
+   items so you can tell at a glance which plan they belong to. */
+const tint = hex => { try{const[h,s]=hexToHsl(hex);return hslToHex(h,s===0?0:Math.max(30,Math.min(s,72)),89);}catch{return'#F0EBE5';} };
 /* Sticky notes inherit the project color, but on dark/black-scheme projects
    that makes dark text unreadable — fall back to a light gray for those. */
 const defaultNoteColor = c => isLight(c) ? c : '#E4E1DC';
@@ -312,55 +315,61 @@ const NoteModal = ({note,onUpdate,onClose}) => {
 /* ── Draggable Notes ───────────────────────────────────────── */
 const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220,projectId,onMoveNote}) => {
   const[dragIdx,setDragIdx]=useState(null);
-  const[overCol,setOverCol]=useState(null);
-  const[overPos,setOverPos]=useState(null);
+  const[overCol,setOverCol]=useState(null); // target column index during a drag
+  const[overPos,setOverPos]=useState(null); // target row within that column
+  const[cols,setCols]=useState(2);          // responsive column count
   const isDragging=useRef(false);
   const startIdx=useRef(null);
   const dragState=useRef({overCol:null,overPos:null}); // stable ref for onPointerUp
-  const leftRefs=useRef([]);
-  const rightRefs=useRef([]);
+  const colRefs=useRef([]);       // colRefs.current[colIndex] = array of note elements
+  const wrapRef=useRef(null);     // container, for width measurement
   const notesRef=useRef(notes);
   useEffect(()=>{notesRef.current=notes;},[notes]);
+  const colsRef=useRef(cols);
+  useEffect(()=>{colsRef.current=cols;},[cols]);
   const hoverZone=useRef(null);   // highlighted cross-project drop zone during a drag
   const cbRef=useRef({});         // latest cross-project callbacks (avoid stale closure in the []-effect)
   cbRef.current.onMoveNote=onMoveNote;cbRef.current.projectId=projectId;
 
-  // Split into columns: even indices -> left, odd -> right
-  const leftNotes=notes.map((n,i)=>({n,i})).filter(x=>x.i%2===0);
-  const rightNotes=notes.map((n,i)=>({n,i})).filter(x=>x.i%2!==0);
+  // Fit as many ~noteWidth columns as the available width allows (min 1), so
+  // wider space shows more notes per row and narrower space wraps them down.
+  const GAP=14;
+  const measureCols=()=>{const el=wrapRef.current;if(!el)return;const w=el.clientWidth||el.getBoundingClientRect().width||noteWidth;const c=Math.max(1,Math.floor((w+GAP)/(noteWidth+GAP)));setCols(prev=>prev===c?prev:c);};
+  useEffect(()=>{measureCols();});                 // every render — catches panel-resize / zoom re-renders
+  useEffect(()=>{                                   // and resizes that don't re-render us
+    measureCols();
+    let ro;try{ro=new ResizeObserver(measureCols);wrapRef.current&&ro.observe(wrapRef.current);}catch(_){}
+    window.addEventListener('resize',measureCols);
+    return()=>{try{ro&&ro.disconnect();}catch(_){}window.removeEventListener('resize',measureCols);};
+  },[]);
+
+  // Row-major round-robin: the first `cols` notes fill the first row.
+  const columns=Array.from({length:cols},(_,c)=>notes.map((n,i)=>({n,i})).filter(x=>x.i%cols===c));
 
   function getDropTarget(clientX,clientY){
-    // Determine col by X position
-    const lEl=leftRefs.current.find(Boolean);
-    const rEl=rightRefs.current.find(Boolean);
-    let col='L';
-    if(lEl&&rEl){
-      const lR=lEl.getBoundingClientRect();
-      const rR=rEl.getBoundingClientRect();
-      col=clientX>(lR.right+rR.left)/2?'R':'L';
-    } else if(rEl&&!lEl){col='R';}
-
-    const refs=col==='L'?leftRefs.current:rightRefs.current;
-    const colNotes=col==='L'?leftNotes:rightNotes;
-    let pos=colNotes.length; // default: append to end
+    const c=colsRef.current;
+    let col=0;
+    const wrap=wrapRef.current;
+    if(wrap){const r=wrap.getBoundingClientRect();col=Math.min(c-1,Math.max(0,Math.floor((clientX-r.left)/Math.max(1,r.width)*c)));}
+    const refs=(colRefs.current[col]||[]).filter(Boolean);
+    let pos=refs.length; // default: append to end of column
     for(let ci=0;ci<refs.length;ci++){
-      const el=refs[ci];if(!el)continue;
-      const r=el.getBoundingClientRect();
+      const r=refs[ci].getBoundingClientRect();
       if(clientY<r.top+r.height/2){pos=ci;break;}
     }
     return{col,pos};
   }
 
   function applyReorder(fromFlatIdx,toCol,toPos){
+    const c=colsRef.current;
     const arr=[...notesRef.current];
     const[moved]=arr.splice(fromFlatIdx,1);
-    // Rebuild columns after removal to find target flat index
-    const newLeft=arr.map((n,i)=>({n,i})).filter(x=>x.i%2===0);
-    const newRight=arr.map((n,i)=>({n,i})).filter(x=>x.i%2!==0);
-    const targetCol=toCol==='L'?newLeft:newRight;
+    // Rebuild the target column after removal to find the insertion flat index.
+    const targetCol=arr.map((n,i)=>({n,i})).filter(x=>x.i%c===toCol);
     const clampedPos=Math.min(toPos,targetCol.length);
     if(clampedPos>=targetCol.length){
-      arr.push(moved);
+      if(targetCol.length===0)arr.splice(Math.min(arr.length,toPos*c+toCol),0,moved); // empty column
+      else arr.splice(targetCol[targetCol.length-1].i+1,0,moved);                      // after column's last note
     } else {
       arr.splice(targetCol[clampedPos].i,0,moved);
     }
@@ -373,8 +382,9 @@ const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220,projectId,onMo
     startIdx.current=flatIdx;
     setDragIdx(flatIdx);
     // init over to current position
-    const col=flatIdx%2===0?'L':'R';
-    const pos=flatIdx%2===0?Math.floor(flatIdx/2):Math.floor(flatIdx/2);
+    const c=colsRef.current;
+    const col=flatIdx%c;
+    const pos=Math.floor(flatIdx/c);
     dragState.current={overCol:col,overPos:pos};
     setOverCol(col);setOverPos(pos);
   }
@@ -438,15 +448,17 @@ const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220,projectId,onMo
 
   const DropLine=()=>html`<div style=${{height:3,background:'rgba(42,40,37,0.2)',borderRadius:2,margin:'2px 4px'}}/>`;
 
-  function renderCol(colNotes,col,refs){
+  function renderCol(colNotes,c){
+    colRefs.current[c]=[];          // refreshed each render so refs match the current notes
+    const refs=colRefs.current[c];
     return html`<div style=${{flex:1,display:'flex',flexDirection:'column',minWidth:0}}>
-      ${overCol===col&&overPos===0&&dragIdx!==null&&html`<${DropLine}/>`}
+      ${overCol===c&&overPos===0&&dragIdx!==null&&html`<${DropLine}/>`}
       ${colNotes.map(({n,i},ci)=>html`
-        <div key=${n.id} ref=${el=>refs.current[ci]=el}
+        <div key=${n.id} ref=${el=>refs[ci]=el}
           style=${{marginBottom:14,opacity:dragIdx===i?0.35:1,transition:'opacity 0.12s'}}>
           <${DragHandle} flatIdx=${i}/>
           ${renderNote(n,i)}
-          ${overCol===col&&overPos===ci+1&&dragIdx!==null&&html`<${DropLine}/>`}
+          ${overCol===c&&overPos===ci+1&&dragIdx!==null&&html`<${DropLine}/>`}
         </div>`)}
       ${colNotes.length===0&&dragIdx!==null&&html`
         <div style=${{height:48,border:'2px dashed rgba(0,0,0,0.1)',borderRadius:6,
@@ -456,9 +468,8 @@ const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220,projectId,onMo
     </div>`;
   }
 
-  return html`<div style=${{display:'flex',gap:14,alignItems:'flex-start',minWidth:noteWidth*2+28}}>
-    ${renderCol(leftNotes,'L',leftRefs)}
-    ${renderCol(rightNotes,'R',rightRefs)}
+  return html`<div ref=${wrapRef} style=${{display:'flex',gap:14,alignItems:'flex-start',width:'100%'}}>
+    ${columns.map((colNotes,c)=>renderCol(colNotes,c))}
   </div>`;
 };
 /* ── Note 3-dot Menu ───────────────────────────────────────── */
@@ -1471,26 +1482,26 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
     const col=i%7;
     return html`
       <div key=${i} onDragOver=${ev=>onDayOver(ev,iso)} onDrop=${ev=>onDayDrop(ev,iso)} onDragLeave=${()=>{if(dragOverIso===iso)setDragOverIso(null);}}
-        style=${{borderRight:col<6?'1px solid #F0EBE5':'none',padding:'5px 5px',background:dragOverIso===iso?'#EAF1FB':isToday?'#FAFAF8':'white',overflowY:'auto',minHeight:62,maxHeight:weeks>1?150:240,transition:'background 0.1s'}}>
+        style=${{borderRight:col<6?'1px solid #F0EBE5':'none',padding:'5px 5px',background:dragOverIso===iso?'#EAF1FB':isToday?'#FAFAF8':'white',overflowY:'auto',minHeight:54,maxHeight:weeks>1?118:188,transition:'background 0.1s'}}>
         <div style=${{marginBottom:5,textAlign:'center'}}>
           <div style=${{fontSize:12,fontWeight:600,lineHeight:1,background:isToday?'#2A2825':'none',color:isToday?'white':'#9A9088',
             borderRadius:'50%',width:20,height:20,display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto'}}>${d.getDate()}</div>
         </div>
         ${dayEvents.map(ev=>html`<${CalEventChip} key=${ev.id} ev=${ev} isStart=${ev.startDate===iso} onEdit=${setEventForm} onDelete=${onDeleteCalendarEvent} onDragStart=${e=>startCalDrag(e,ev)}/>`)}
         ${eventsNoTime.map(e=>html`
-          <div key=${e.id} draggable=${true} onDragStart=${ev=>startItemDrag(ev,e)} style=${{background:e.important?PRIORITY_BG:'#F0EBE5',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${e.projectColor}`,cursor:'grab'}} onClick=${ev=>openTaskPicker(ev,e)}>
-            <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${e.text}</div>
+          <div key=${e.id} draggable=${true} onDragStart=${ev=>startItemDrag(ev,e)} style=${{background:tint(e.projectColor),borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`3px solid ${e.projectColor}`,cursor:'grab'}} onClick=${ev=>openTaskPicker(ev,e)}>
+            <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${e.important?html`<span style=${{color:PRIORITY_COLOR}}>★ </span>`:''}${e.text}</div>
           </div>`)}
         ${untimedTasks.map(t=>html`
-          <div key=${t.id} draggable=${true} onDragStart=${ev=>startItemDrag(ev,t)} style=${{background:(t.kind==='task'&&priorityIds.includes(t.id))?PRIORITY_BG:'#F7F5F2',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${t.projectColor}`,cursor:'grab'}} onClick=${e=>openTaskPicker(e,t)}>
-            <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${t.text}</div>
+          <div key=${t.id} draggable=${true} onDragStart=${ev=>startItemDrag(ev,t)} style=${{background:tint(t.projectColor),borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`3px solid ${t.projectColor}`,cursor:'grab'}} onClick=${e=>openTaskPicker(e,t)}>
+            <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${(t.kind==='task'&&priorityIds.includes(t.id))?html`<span style=${{color:PRIORITY_COLOR}}>★ </span>`:''}${t.text}</div>
           </div>`)}
         ${timed.length>0&&html`
           <div style=${{borderTop:'1px solid #EAE4DC',marginTop:3,paddingTop:3}}>
             ${timed.map(t=>html`
-              <div key=${t.id} draggable=${true} onDragStart=${ev=>startItemDrag(ev,t)} style=${{background:t.kind==='event'?t.important?PRIORITY_BG:'#F0EBE5':t.kind==='task'&&priorityIds.includes(t.id)?PRIORITY_BG:'#EEF4FB',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${t.projectColor}`,cursor:'grab'}} onClick=${e=>openTaskPicker(e,t)}>
+              <div key=${t.id} draggable=${true} onDragStart=${ev=>startItemDrag(ev,t)} style=${{background:tint(t.projectColor),borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`3px solid ${t.projectColor}`,cursor:'grab'}} onClick=${e=>openTaskPicker(e,t)}>
                 <div style=${{fontSize:9,color:'#9A9088',marginBottom:1}}>${fmtTime(t.taskTime)}${t.endTime?'–'+fmtTime(t.endTime):''}</div>
-                <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${t.text}</div>
+                <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${((t.kind==='event'&&t.important)||(t.kind!=='event'&&priorityIds.includes(t.id)))?html`<span style=${{color:PRIORITY_COLOR}}>★ </span>`:''}${t.text}</div>
               </div>`)}
           </div>`}
         ${!hasAny&&html`<div style=${{height:14}}></div>`}
@@ -1550,7 +1561,7 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
         ${DAY_NAMES.map((n,i)=>html`<div key=${n} style=${{textAlign:'center',padding:'4px 0',fontSize:9,letterSpacing:'0.5px',textTransform:'uppercase',color:i===today?'#2A2825':'#B0A898',fontWeight:600,borderRight:i<6?'1px solid #F0EBE5':'none'}}>${n}</div>`)}
       </div>
       <!-- One row per week -->
-      <div style=${{maxHeight:weeks>1?360:260,overflowY:'auto'}}>
+      <div style=${{maxHeight:weeks>1?300:210,overflowY:'auto'}}>
         ${Array.from({length:weeks}).map((_,w)=>html`
           <div key=${w} style=${{display:'grid',gridTemplateColumns:'repeat(7,1fr)',borderTop:w>0?'1px solid #EAE4DC':'none',minHeight:80}}>
             ${Array.from({length:7}).map((_,col)=>renderDayCell(w*7+col,weekDates[w*7+col]))}
@@ -2062,7 +2073,7 @@ const AddPasskeyButton = () => {
 /* Draggable divider that resizes an adjacent side panel. dir=+1 grows the
    panel when dragged right (left/Master panel), dir=-1 grows it when dragged
    left (right/Brain panel). maxByWindow keeps the center from being squeezed. */
-const PanelResizer = ({width,setWidth,dir,min,max,maxByWindow}) => {
+const PanelResizer = ({width,setWidth,dir,min,max,maxByWindow,zoom=1}) => {
   const[hov,setHov]=useState(false);
   const onDown=e=>{
     e.preventDefault();
@@ -2072,7 +2083,7 @@ const PanelResizer = ({width,setWidth,dir,min,max,maxByWindow}) => {
     const move=ev=>{
       clearSel();
       const hi=Math.min(max,maxByWindow?maxByWindow():max);
-      setWidth(Math.round(Math.max(min,Math.min(hi,startW+dir*(ev.clientX-startX)))));
+      setWidth(Math.round(Math.max(min,Math.min(hi,startW+dir*(ev.clientX-startX)/zoom))));
     };
     const up=()=>{
       window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);
@@ -2301,7 +2312,7 @@ const App = () => {
   };
 
   return html`
-    <div style=${{zoom,width:'100%',height:'100%',display:'flex',flexDirection:'column',background:'#F4F1ED'}}>
+    <div style=${{width:'100%',height:'100%',display:'flex',flexDirection:'column',background:'#F4F1ED'}}>
       <header style=${{padding:'12px 22px',display:'flex',alignItems:'center',justifyContent:'space-between',borderBottom:'1px solid #EAE4DC',background:'#F4F1ED',flexShrink:0,zIndex:30,gap:10}}>
         <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:21,letterSpacing:'-0.3px',flexShrink:0}}>Planner</div>
         <div style=${{display:'flex',gap:6,flexWrap:'wrap',justifyContent:'flex-end',alignItems:'center'}}>
@@ -2334,7 +2345,7 @@ const App = () => {
           </div>`}
         </div>
       </header>
-      <div style=${{flex:1,display:'flex',overflow:'hidden'}}>
+      <div style=${{flex:1,display:'flex',overflow:'hidden',zoom}}>
         <${MasterPanel} projects=${projects} priorityIds=${priorityIds}
           onToggleDone=${masterToggleDone} onTogglePriority=${togglePriority}
           onToggleReminderDone=${masterToggleReminderDone} onToggleEventDone=${masterToggleEventDone}
@@ -2343,8 +2354,8 @@ const App = () => {
           onToggleCompleted=${()=>upState({completedExpanded:!completedExpanded})}
           onAssignDay=${assignDayFromMaster} weeks=${weeksToShow}
           collapsed=${masterCollapsed} onToggleCollapse=${()=>setMasterCollapsed(p=>!p)} width=${masterWidth}/>
-        ${!masterCollapsed&&html`<${PanelResizer} width=${masterWidth} setWidth=${setMasterWidth} dir=${1} min=${180} max=${560}
-          maxByWindow=${()=>window.innerWidth-(brainyCollapsed?30:brainWidth)-320}/>`}
+        ${!masterCollapsed&&html`<${PanelResizer} width=${masterWidth} setWidth=${setMasterWidth} dir=${1} min=${180} max=${560} zoom=${zoom}
+          maxByWindow=${()=>window.innerWidth/zoom-(brainyCollapsed?30:brainWidth)-320}/>`}
         <div style=${{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
           <${WeekCalendar} projects=${projects} priorityIds=${priorityIds} weeks=${weeksToShow} onSetWeeks=${setWeeks}
             calendarEvents=${calendarEvents} onSaveCalendarEvent=${saveCalendarEvent} onDeleteCalendarEvent=${deleteCalendarEvent}
@@ -2372,8 +2383,8 @@ const App = () => {
             renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow} onMoveNote=${moveNote}/>`}/>
           </div>
         </div>
-        ${!brainyCollapsed&&html`<${PanelResizer} width=${brainWidth} setWidth=${setBrainWidth} dir=${-1} min=${240} max=${600}
-          maxByWindow=${()=>window.innerWidth-(masterCollapsed?28:masterWidth)-320}/>`}
+        ${!brainyCollapsed&&html`<${PanelResizer} width=${brainWidth} setWidth=${setBrainWidth} dir=${-1} min=${240} max=${600} zoom=${zoom}
+          maxByWindow=${()=>window.innerWidth/zoom-(masterCollapsed?28:masterWidth)-320}/>`}
         <${BrainySidebar} insights=${insights} projects=${projects}
           onAdd=${addInsightToPlanner} onAddToNote=${addInsightToExistingNote} onDismiss=${dismissInsight} onCapture=${addCapturedInsights}
           onReorder=${setInsights} width=${brainWidth}
