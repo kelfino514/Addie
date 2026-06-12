@@ -159,39 +159,12 @@ const importBackup = (file,cb) => {
   const r=new FileReader();r.onload=e=>{try{cb(JSON.parse(e.target.result));}catch{alert('Invalid backup file.');}};r.readAsText(file);
 };
 
-/* ── Seed ──────────────────────────────────────────────────── */
-const makeSeed = () => {
-  const C=PROJECT_COLORS;
-  const mk=(name,color,tasks=[],reminders=[],events=[],notes=[])=>({
-    id:uid(),name,color,
-    tasks:tasks.map(t=>({id:uid(),text:t,done:false})),
-    reminders:reminders.map(r=>({id:uid(),text:r,done:false,flagged:true})),
-    events:events.map(e=>({id:uid(),text:e,done:false,important:false,dueDate:null,taskTime:null,endTime:null})),
-    notes:notes.map(n=>({id:uid(),title:n.t,text:n.b||'',color:defaultNoteColor(color),gradientStep:null,checklistItems:[],collapsed:false})),
-  });
-  return{
-    projects:[
-      mk('Peds Team',C[0],
-        ['Plan skills day lectures','Super User education plan/presentation'],
-        ['Hemodynamics cheat sheet','Showpad checklist'],
-        [],
-        [{t:'Dr. Dwight Bailey',b:"• PICU attending @ Levine Children's\n• lecture Peds team on Hemo + see if we like it"},
-         {t:'check Tableau access - Patrick'}]),
-      mk('Dell – Austin, TX',C[6],
-        ['Lindsay schematic','Gottlieb illustration','OR Breakfast 6/4'],
-        ['PICU hemo education'],
-        ['patient day Sept 22','Stromberg vendor day Dec 10–12'],
-        [{t:'Super user class',b:"1 hour - screen setup, troubleshooting, guide through scenarios\nPlan for right after skills day"}]),
-      mk('Shriners – Sacramento, CA',C[16],['touch base 6/1 to confirm plans'],[],[],[]),
-      mk("Valley Children's – Fresno, CA",C[10],['Check in w/ NIRS champ (Dr. HarryKallas)'],[],[],[]),
-      mk("Phoenix Children's – Phoenix, AZ",C[12],['Site visit'],[],[],[]),
-      mk('Rady – San Diego, CA',C[11],[],[],[],
-        [{t:'FYI',b:"• if they change DPT, then they change tiers\n• Also offered two year rebate\n• INVOS contract ends?"},
-         {t:'Ideas',b:"• Loop in Dr. Dwight Bailey to give Hemo lecture?\n• offer help w/ pt selection w/ MDs & walk through clinical decision making"}]),
-    ],
-    priorityIds:[],completedExpanded:false,
-  };
-};
+/* ── Seed ──────────────────────────────────────────────────────
+   A brand-new user (no server row, no local cache) starts with a blank
+   planner — the "No projects yet — add one above" empty state guides them
+   to create their first project. (Earlier builds seeded demo sales data;
+   recover it from git history if a demo seed is ever needed again.) */
+const makeSeed = () => ({ projects:[], priorityIds:[], completedExpanded:false });
 
 /* Auto-empty: drop completed items whose completion is older than 14 days. */
 const PURGE_DAYS=14;
@@ -1493,20 +1466,12 @@ const buildPrintHTML = (projects,priorityIds,completedExpanded) => {
 };
 
 /* ── Brainy Insights ───────────────────────────────────────────
-   Milestone 1: hardcoded sample insights + a local quick-capture
-   extractor (heuristic, not AI). Milestone 2 replaces SAMPLE_INSIGHTS
-   and the extractor with a call to a Netlify Function /api/brainy
-   that runs Claude server-side (keys stay off the client).
-   The shape below is exactly what that endpoint will return, so the
-   sidebar UI does not change when the AI goes live.
-   type: 'action' -> task | 'followup'/'reminder' -> reminder | 'idea' */
-const SAMPLE_INSIGHTS = [
-  {id:uid(),type:'action',  text:'Send updated hemodynamic pricing sheet to Dr. Dwight Bailey', source:'Teams recap · Peds Team',          suggestProject:'Peds Team',                    suggestKind:'task'},
-  {id:uid(),type:'followup',text:'Awaiting Tableau access confirmation from Patrick',            source:'Voice note · Peds Team',           suggestProject:'Peds Team',                    suggestKind:'reminder'},
-  {id:uid(),type:'action',  text:'Confirm OR breakfast headcount & timing for 6/4',             source:'Voice note · Dell – Austin, TX',   suggestProject:'Dell – Austin, TX',            suggestKind:'event'},
-  {id:uid(),type:'reminder',text:'Touch base 6/1 to confirm Shriners site visit plans',          source:'Teams recap · Shriners',           suggestProject:'Shriners – Sacramento, CA',    suggestKind:'reminder'},
-  {id:uid(),type:'idea',    text:'Prep INVOS contract renewal talking points before Rady visit', source:'Note · Rady – San Diego, CA',       suggestProject:'Rady – San Diego, CA',         suggestKind:'task'},
-];
+   The Brain sidebar starts empty; insight cards appear when the user
+   captures a voice/text note (→ /api/brainy). Insight shape:
+   { id, type:'action'|'followup'|'reminder'|'idea'|'summary', text,
+     source, suggestProject?, suggestKind:'task'|'reminder'|'event'|'note' }
+   (Earlier builds seeded sample cards here — see git history.) */
+const SAMPLE_INSIGHTS = [];
 
 const INSIGHT_STYLES = {
   action:  {label:'To-do',      color:PRIORITY_COLOR, bg:PRIORITY_BG},
