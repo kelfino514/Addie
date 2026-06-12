@@ -1969,7 +1969,9 @@ const App = () => {
   const[brainyCollapsed,setBrainyCollapsed]=useState(false);
   const[masterWidth,setMasterWidth]=useState(()=>loadPrefs().masterWidth||260);
   const[brainWidth,setBrainWidth]=useState(()=>loadPrefs().brainWidth||312);
-  useEffect(()=>{savePrefs({...loadPrefs(),masterWidth,brainWidth});},[masterWidth,brainWidth]);
+  const[zoom,setZoom]=useState(()=>loadPrefs().zoom||1);
+  useEffect(()=>{savePrefs({...loadPrefs(),masterWidth,brainWidth,zoom});},[masterWidth,brainWidth,zoom]);
+  const stepZoom=d=>setZoom(z=>Math.min(1.6,Math.max(0.6,Math.round((z+d)*10)/10)));
   const[insights,setInsights]=useState(SAMPLE_INSIGHTS);
   const fileRef=useRef(null);
   const debouncedSaveRef=useRef(debounce(saveState,1200));
@@ -2150,10 +2152,15 @@ const App = () => {
   };
 
   return html`
-    <div style=${{height:'100%',display:'flex',flexDirection:'column',background:'#F4F1ED'}}>
+    <div style=${{zoom,width:`${100/zoom}%`,height:`${100/zoom}%`,display:'flex',flexDirection:'column',background:'#F4F1ED'}}>
       <header style=${{padding:'12px 22px',display:'flex',alignItems:'center',justifyContent:'space-between',borderBottom:'1px solid #EAE4DC',background:'#F4F1ED',flexShrink:0,zIndex:30,gap:10}}>
         <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:21,letterSpacing:'-0.3px',flexShrink:0}}>Planner</div>
-        <div style=${{display:'flex',gap:6,flexWrap:'wrap',justifyContent:'flex-end'}}>
+        <div style=${{display:'flex',gap:6,flexWrap:'wrap',justifyContent:'flex-end',alignItems:'center'}}>
+          <div style=${{display:'flex',alignItems:'center',border:'1px solid #E0D8D0',borderRadius:16,overflow:'hidden'}} title="Zoom — makes everything fit, or larger to read">
+            <button onClick=${()=>stepZoom(-0.1)} title="Zoom out" style=${{background:'none',border:'none',color:'#7A7068',fontSize:15,lineHeight:1,cursor:'pointer',padding:'4px 9px'}}>−</button>
+            <span onClick=${()=>setZoom(1)} title="Reset to 100%" style=${{fontSize:11,color:'#7A7068',minWidth:36,textAlign:'center',cursor:'pointer',userSelect:'none'}}>${Math.round(zoom*100)}%</span>
+            <button onClick=${()=>stepZoom(0.1)} title="Zoom in" style=${{background:'none',border:'none',color:'#7A7068',fontSize:15,lineHeight:1,cursor:'pointer',padding:'4px 9px'}}>+</button>
+          </div>
           <button onClick=${()=>setAddingProject(true)} style=${{background:'#2A2825',color:'#F4F1ED',border:'none',borderRadius:16,padding:'6px 14px',fontSize:12,fontWeight:500,cursor:'pointer'}}>+ Project</button>
           ${pendingAllCount>0&&html`<button onClick=${completeAll}
             title="Archive all completed items across every project to Master Completed"
