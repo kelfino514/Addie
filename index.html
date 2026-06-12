@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="default"/>
-<meta name="apple-mobile-web-app-title" content="Planner + Brainy"/>
+<meta name="apple-mobile-web-app-title" content="Addie App"/>
 <meta name="theme-color" content="#F4F1ED"/>
-<title>Planner + Brainy</title>
+<title>Addie App</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Serif+Display:ital@0;1&family=Caveat:wght@400;600&display=swap" rel="stylesheet"/>
@@ -200,6 +200,15 @@ const importBackup = (file,cb) => {
    to create their first project. (Earlier builds seeded demo sales data;
    recover it from git history if a demo seed is ever needed again.) */
 const makeSeed = () => ({ projects:[], priorityIds:[], completedExpanded:false });
+
+// Which projects render expanded for a given state blob. The collapsed list
+// (state.collapsedIds) is part of the synced state, so a collapsed project
+// stays collapsed across refreshes and sign-ins. Old blobs without the field
+// expand everything — the original behavior.
+const expandedFromState = s => {
+  const collapsed=new Set((s&&s.collapsedIds)||[]);
+  return new Set(((s&&s.projects)||[]).filter(p=>!collapsed.has(p.id)).map(p=>p.id));
+};
 
 /* Auto-empty: drop completed items whose completion is older than 14 days. */
 const PURGE_DAYS=14;
@@ -492,7 +501,7 @@ const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220,projectId,onMo
   </div>`;
 };
 /* ── Note 3-dot Menu ───────────────────────────────────────── */
-const NoteThreeDotMenu = ({onDelete}) => {
+const NoteThreeDotMenu = ({onDelete,hidden,onToggleHidden}) => {
   const[open,setOpen]=useState(false);
   const ref=useRef(null);
   useEffect(()=>{
@@ -507,6 +516,10 @@ const NoteThreeDotMenu = ({onDelete}) => {
       ${open&&html`<div style=${{position:'absolute',right:0,top:'calc(100% + 2px)',background:'white',
         borderRadius:8,boxShadow:'0 6px 24px rgba(0,0,0,0.14)',border:'1px solid rgba(0,0,0,0.06)',
         minWidth:130,zIndex:900}}>
+        ${onToggleHidden&&html`<button onClick=${()=>{setOpen(false);onToggleHidden();}}
+          title=${hidden?'Show this note again':'Tuck this note away — bring it back from the “hidden” toggle in the Sticky Notes header'}
+          style=${{width:'100%',padding:'9px 13px',background:'none',border:'none',cursor:'pointer',
+            textAlign:'left',fontSize:12,color:'#2A2825',borderRadius:8,borderBottom:'1px solid #F0EBE5'}}>${hidden?'Unhide note':'Hide note'}</button>`}
         <button onClick=${()=>{setOpen(false);onDelete();}}
           style=${{width:'100%',padding:'9px 13px',background:'none',border:'none',cursor:'pointer',
             textAlign:'left',fontSize:12,color:'#A0291E',borderRadius:8}}>Delete note</button>
@@ -559,7 +572,7 @@ const StickyNote = ({note,onUpdate,onDelete,projectColor,noteWidth=220}) => {
     <${Fragment}>
       <div style=${{background:note.color,borderRadius:6,width:noteWidth,flexShrink:0,position:'relative',
         boxShadow:'2px 4px 14px rgba(0,0,0,0.11)',display:'flex',flexDirection:'column',
-        transform:'rotate(-0.4deg)'}}>
+        transform:'rotate(-0.4deg)',opacity:note.hidden?0.55:1}}>
         <!-- Header: evenly spaced, taller, larger tap targets -->
         <div style=${{height:36,background:'rgba(255,255,255,0.4)',
           borderBottom:collapsed?'none':'1px solid rgba(0,0,0,0.05)',
@@ -585,7 +598,7 @@ const StickyNote = ({note,onUpdate,onDelete,projectColor,noteWidth=220}) => {
               transform:collapsed?'rotate(-90deg)':'rotate(0deg)',transition:'transform 0.2s'}}
             title=${collapsed?'Expand':'Collapse'}>▾</button>
           <!-- 3-dot menu -->
-          <${NoteThreeDotMenu} onDelete=${onDelete}/>
+          <${NoteThreeDotMenu} onDelete=${onDelete} hidden=${!!note.hidden} onToggleHidden=${()=>onUpdate({...note,hidden:!note.hidden})}/>
         </div>
         ${collapsed&&html`<div onClick=${e=>{e.stopPropagation();onUpdate({...note,collapsed:false});}} style=${{padding:'6px 10px',cursor:'pointer'}}>
           <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:13,color:'#2A2825',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',opacity:0.85}}>
@@ -735,6 +748,9 @@ const EventRow = ({event,onToggleDone,onDelete,onEdit,onOpenPicker,onToggleImpor
             ${event.taskTime&&html`<span style=${{fontSize:11,color:'#9A9088',marginLeft:4}}>
               ${fmtTime(event.taskTime)}${event.endTime?'–'+fmtTime(event.endTime):''}
             </span>`}
+            ${event.endDate&&event.dueDate&&html`<span title="Spans ${isoToLong(event.dueDate)} – ${isoToLong(event.endDate)}" style=${{fontSize:11,color:'#5B8FBF',marginLeft:4,whiteSpace:'nowrap'}}>
+              ${isoToShort(event.dueDate)}–${isoToShort(event.endDate)}
+            </span>`}
           </span>`}
       <div style=${{display:'flex',alignItems:'center',gap:2,flexShrink:0,marginLeft:'auto'}}>
         <button onClick=${e=>{e.stopPropagation();onOpenPicker(e,event);}} title="Assign to a day"
@@ -802,11 +818,18 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
   const deleteEvent=id=>updateEvents((project.events||[]).filter(e=>e.id!==id));
   const editEvent=(id,text)=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,text}:e));
   const toggleEventImportant=id=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,important:!e.important}:e));
-  const assignEventDay=(id,day,time,end)=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,dueDate:day,taskTime:time,endTime:end}:e));
+  const assignEventDay=(id,day,time,end,endDate=null)=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,dueDate:day,taskTime:time,endTime:end,endDate}:e));
   const assignReminderDay=(id,day,time,end)=>updateReminders((project.reminders||[]).map(r=>r.id===id?{...r,dueDate:day,taskTime:time,endTime:end}:r));
   const addNote=()=>updateNotes([...project.notes,{id:uid(),title:'',text:'',color:defaultNoteColor(project.color),gradientStep:null,checklistItems:[],collapsed:false}]);
   const updateNote=u=>updateNotes(project.notes.map(n=>n.id===u.id?u:n));
   const deleteNote=id=>updateNotes(project.notes.filter(n=>n.id!==id));
+  // Hidden notes stay in the data (and sync) but leave the board until revealed.
+  const[showHidden,setShowHidden]=useState(false);
+  const hiddenCount=project.notes.filter(n=>n.hidden).length;
+  const visibleNotes=showHidden?project.notes:project.notes.filter(n=>!n.hidden);
+  // Reorder commits the whole notes array — when hidden notes are filtered out
+  // of the drag list, re-append them so a reorder can never drop them.
+  const reorderVisibleNotes=ordered=>updateNotes(showHidden?ordered:[...ordered,...project.notes.filter(n=>n.hidden)]);
   const handleColorChange=color=>{
     const ns=generateGradientScale(color);
     const notes=project.notes.map(n=>{if(n.gradientStep!=null)return{...n,color:ns[n.gradientStep]};if(n.color===project.color||n.color===defaultNoteColor(project.color))return{...n,color:defaultNoteColor(color)};return n;});
@@ -895,11 +918,18 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
           <div style=${{flex:1,padding:'12px 16px 16px',minWidth:0,overflowX:'auto',overflowY:'visible',WebkitOverflowScrolling:'touch'}}>
             <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
               <span style=${{fontSize:10,letterSpacing:'0.9px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>Sticky Notes</span>
-              <button onClick=${addNote} style=${{background:'#F7F5F2',color:'#7A7068',border:'1px solid #E0D8D0',borderRadius:6,padding:'3px 10px',fontSize:11,cursor:'pointer',fontWeight:500}}>+ Note</button>
+              <div style=${{display:'flex',alignItems:'center',gap:6}}>
+                ${hiddenCount>0&&html`<button onClick=${()=>setShowHidden(p=>!p)}
+                  title=${showHidden?'Tuck hidden notes away again':'Show hidden notes (dimmed) so you can unhide them'}
+                  style=${{background:showHidden?'#EFEAE3':'none',color:'#9A9088',border:'1px solid #E0D8D0',borderRadius:6,padding:'3px 8px',fontSize:11,cursor:'pointer',fontWeight:500}}>${showHidden?'Hide':'Show'} ${hiddenCount} hidden</button>`}
+                <button onClick=${addNote} style=${{background:'#F7F5F2',color:'#7A7068',border:'1px solid #E0D8D0',borderRadius:6,padding:'3px 10px',fontSize:11,cursor:'pointer',fontWeight:500}}>+ Note</button>
+              </div>
             </div>
             ${project.notes.length===0
               ?html`<div style=${{color:'#C0B8B0',fontSize:12,fontStyle:'italic',lineHeight:1.6}}>Add sticky notes for this project.<br/><span style=${{fontSize:11}}>Tap color circle to recolor. Tap ⤢ to expand. Drag handle above note to reorder.</span></div>`
-              :html`<${DraggableNotes} notes=${project.notes} onReorder=${updateNotes} projectId=${project.id} onMoveNote=${(note,toId)=>onMoveNote&&onMoveNote(note,project.id,toId)} noteWidth=${leftCollapsed?(masterCollapsed?380:320):(masterCollapsed?280:220)}
+              :visibleNotes.length===0
+              ?html`<div style=${{color:'#C0B8B0',fontSize:12,fontStyle:'italic',lineHeight:1.6}}>All ${hiddenCount} note${hiddenCount>1?'s are':' is'} hidden — tap “Show ${hiddenCount} hidden” above.</div>`
+              :html`<${DraggableNotes} notes=${visibleNotes} onReorder=${reorderVisibleNotes} projectId=${project.id} onMoveNote=${(note,toId)=>onMoveNote&&onMoveNote(note,project.id,toId)} noteWidth=${leftCollapsed?(masterCollapsed?380:320):(masterCollapsed?280:220)}
                 renderNote=${(note)=>html`<${StickyNote} key=${note.id} note=${note} onUpdate=${updateNote} onDelete=${()=>deleteNote(note.id)} projectColor=${project.color} noteWidth=${leftCollapsed?(masterCollapsed?380:320):(masterCollapsed?280:220)}/>`}/>`}
           </div>
 
@@ -942,7 +972,7 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
       </div>
       ${eventPickerData&&html`<div style=${{position:'fixed',top:eventPickerData.top,left:eventPickerData.left,zIndex:9999}}>
         <${DayTimePicker} task=${eventPickerData.event} isEvent=${true} weeks=${weeks}
-          onAssign=${(day,time,end)=>{assignEventDay(eventPickerData.event.id,day,time,end);setEventPickerData(null);}}
+          onAssign=${(day,time,end,endDate)=>{assignEventDay(eventPickerData.event.id,day,time,end,endDate);setEventPickerData(null);}}
           onClose=${()=>setEventPickerData(null)}/>
       </div>`}
       ${itemPickerData&&html`<div style=${{position:'fixed',top:itemPickerData.top,left:itemPickerData.left,zIndex:9999}}>
@@ -1292,6 +1322,10 @@ const DayTimePicker = ({task,onAssign,onClose,isEvent=false,weeks=1}) => {
   const[startT,setStartT]=useState(task.taskTime??{h:9,m:0,ampm:'am'});
   const[hasEnd,setHasEnd]=useState(!!task.endTime);
   const[endT,setEndT]=useState(task.endTime??{h:10,m:0,ampm:'am'});
+  // Events can span days (like standalone calendar events): an optional last day.
+  const[hasEndDate,setHasEndDate]=useState(!!task.endDate);
+  const[endDate,setEndDate]=useState(task.endDate||'');
+  const nextDayISO=iso=>{const d=new Date(iso);d.setUTCDate(d.getUTCDate()+1);return d.toISOString().slice(0,10);};
   const ref=useRef(null);
 
   useEffect(()=>{
@@ -1308,10 +1342,12 @@ const DayTimePicker = ({task,onAssign,onClose,isEvent=false,weeks=1}) => {
   const apply=()=>{
     const time=hasTime?startT:null;
     const end=hasTime&&hasEnd?endT:null;
-    onAssign(due,time,end);
+    // 4th arg: an event's last day (null = single-day). Task/reminder callers ignore it.
+    const eDate=isEvent&&due&&hasEndDate&&endDate&&endDate>due?endDate:null;
+    onAssign(due,time,end,eDate);
     onClose();
   };
-  const clear=()=>{onAssign(null,null,null);onClose();};
+  const clear=()=>{onAssign(null,null,null,null);onClose();};
 
   const btnBase={border:'none',borderRadius:6,cursor:'pointer',fontSize:11,fontWeight:500,padding:'5px 0',textAlign:'center'};
 
@@ -1354,6 +1390,19 @@ const DayTimePicker = ({task,onAssign,onClose,isEvent=false,weeks=1}) => {
           Scheduled for <strong>${isoToLong(due)}</strong> — it'll drop onto the calendar once that date falls within the next ${weeks} week${weeks>1?'s':''}.
         </div>`}
       ${due&&html`<div style=${{display:'flex',flexDirection:'column',gap:10}}>
+        <!-- Last day (events only) — makes the event span days on the calendar -->
+        ${isEvent&&html`<div>
+          <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:hasEndDate?6:0}}>
+            <div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>Last day</div>
+            <button onClick=${()=>{setHasEndDate(p=>{const on=!p;if(on&&(!endDate||endDate<=due))setEndDate(nextDayISO(due));return on;});}}
+              style=${{background:'none',border:'none',cursor:'pointer',fontSize:11,color:hasEndDate?'#2A2825':'#9A9088',textDecoration:'underline',textUnderlineOffset:2}}>
+              ${hasEndDate?'Remove':'Spans multiple days'}
+            </button>
+          </div>
+          ${hasEndDate&&html`<input type="date" value=${endDate} min=${due}
+            onInput=${e=>setEndDate(e.target.value)}
+            style=${{width:'100%',border:'1px solid #E0D8D0',borderRadius:6,padding:'5px 8px',fontSize:12,color:'#2A2825',background:'#FAFAF8',outline:'none'}}/>`}
+        </div>`}
         <!-- Start time -->
         <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
           <div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>Start time</div>
@@ -1447,12 +1496,28 @@ const CalEventForm = ({event,onSave,onDelete,onClose}) => {
     </div>`;
 };
 
-const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssignDay,weeks=1,onSetWeeks,calendarEvents=[],onSaveCalendarEvent,onDeleteCalendarEvent}) => {
+const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssignDay,weeks=1,onSetWeeks,calendarEvents=[],onSaveCalendarEvent,onDeleteCalendarEvent,calHeight=null,onSetCalHeight,zoom=1}) => {
   const weekDates=getWeekDates(weeks);
   const today=new Date().getDay();
   const[pickerTask,setPickerTask]=useState(null);
   const[pickerPos,setPickerPos]=useState({top:0,left:0});
   const[eventForm,setEventForm]=useState(null); // null=closed | 'new' (add) | event object (edit)
+  // Drag the bar under the calendar to set a fixed height (per-device pref);
+  // null = automatic (sized by content). Works the same with 1 week or 4.
+  const rowsRef=useRef(null);
+  const startHeightDrag=e=>{
+    if(!onSetCalHeight)return;
+    e.preventDefault();
+    const startY=e.clientY;
+    const startH=calHeight||(rowsRef.current?rowsRef.current.getBoundingClientRect().height/zoom:210);
+    const noSel=v=>{document.body.style.userSelect=v;document.body.style.webkitUserSelect=v;};
+    const move=ev=>onSetCalHeight(Math.round(Math.max(70,Math.min(window.innerHeight*0.75/zoom,startH+(ev.clientY-startY)/zoom))));
+    const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);document.body.style.cursor='';noSel('');};
+    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
+    document.body.style.cursor='ns-resize';noSel('none');
+  };
+  // With a fixed height each week-row gets an equal share; cells scroll inside.
+  const cellMax=calHeight?Math.max(54,Math.floor(calHeight/weeks)-2):(weeks>1?118:188);
   // Standalone calendar events, sorted so a multi-day event keeps a stable row across days.
   const sortedCalEvents=[...calendarEvents].sort((a,b)=>a.startDate<b.startDate?-1:a.startDate>b.startDate?1:(a.id<b.id?-1:1));
   const openTaskPicker=(e,t)=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setPickerPos({top:Math.min(r.bottom+4,window.innerHeight-400),left:Math.max(4,Math.min(r.left,window.innerWidth-300))});setPickerTask(t);};
@@ -1469,11 +1534,16 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
     (p.events||[]).filter(e=>!e.done&&e.dueDate)
       .map(e=>({...e,kind:'event',projectColor:p.color,projectId:p.id}))
   );
+  // Project events with a last day render as spanning bars (like standalone
+  // calendar events) instead of single-day chips. Stable sort keeps a span on
+  // the same row across its days.
+  const isSpan=e=>e.endDate&&e.endDate>e.dueDate;
+  const spanEvents=allEvents.filter(isSpan).sort((a,b)=>a.dueDate<b.dueDate?-1:a.dueDate>b.dueDate?1:(a.id<b.id?-1:1));
 
   const itemsForDay=iso=>{
     const tasks=allTasks.filter(t=>t.dueDate===iso);
     const reminders=allReminders.filter(r=>r.dueDate===iso);
-    const events=allEvents.filter(e=>e.dueDate===iso);
+    const events=allEvents.filter(e=>e.dueDate===iso&&!isSpan(e));
     const eventsNoTime=events.filter(e=>!e.taskTime);
     const timed=[...tasks.filter(t=>t.taskTime),...reminders.filter(r=>r.taskTime),...events.filter(e=>e.taskTime)]
       .sort((a,b)=>timeSortVal(a.taskTime)-timeSortVal(b.taskTime));
@@ -1497,16 +1567,25 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
     const isToday=iso===todayISO();
     const{eventsNoTime,untimedTasks,timed}=itemsForDay(iso);
     const dayEvents=sortedCalEvents.filter(ev=>ev.startDate<=iso&&iso<=(ev.endDate||ev.startDate));
-    const hasAny=dayEvents.length>0||eventsNoTime.length>0||untimedTasks.length>0||timed.length>0;
+    const daySpans=spanEvents.filter(e=>e.dueDate<=iso&&iso<=e.endDate);
+    const hasAny=dayEvents.length>0||daySpans.length>0||eventsNoTime.length>0||untimedTasks.length>0||timed.length>0;
     const col=i%7;
     return html`
       <div key=${i} onDragOver=${ev=>onDayOver(ev,iso)} onDrop=${ev=>onDayDrop(ev,iso)} onDragLeave=${()=>{if(dragOverIso===iso)setDragOverIso(null);}}
-        style=${{borderRight:col<6?'1px solid #F0EBE5':'none',padding:'5px 5px',background:dragOverIso===iso?'#EAF1FB':isToday?'#FAFAF8':'white',overflowY:'auto',minHeight:54,maxHeight:weeks>1?118:188,transition:'background 0.1s'}}>
+        style=${{borderRight:col<6?'1px solid #F0EBE5':'none',padding:'5px 5px',background:dragOverIso===iso?'#EAF1FB':isToday?'#FAFAF8':'white',overflowY:'auto',minHeight:54,maxHeight:cellMax,transition:'background 0.1s'}}>
         <div style=${{marginBottom:5,textAlign:'center'}}>
           <div style=${{fontSize:12,fontWeight:600,lineHeight:1,background:isToday?'#2A2825':'none',color:isToday?'white':'#9A9088',
             borderRadius:'50%',width:20,height:20,display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto'}}>${d.getDate()}</div>
         </div>
         ${dayEvents.map(ev=>html`<${CalEventChip} key=${ev.id} ev=${ev} isStart=${ev.startDate===iso} onEdit=${setEventForm} onDelete=${onDeleteCalendarEvent} onDragStart=${e=>startCalDrag(e,ev)}/>`)}
+        ${daySpans.map(e=>html`
+          <div key=${e.id} draggable=${true} onDragStart=${ev=>startItemDrag(ev,e)} onClick=${ev=>openTaskPicker(ev,e)} title="Edit event"
+            style=${{background:tint(e.projectColor),borderRadius:4,padding:'2px 5px',marginBottom:3,minHeight:15,display:'flex',alignItems:'center',cursor:'grab',
+              borderLeft:e.dueDate===iso?`3px solid ${e.projectColor}`:'none'}}>
+            <span style=${{fontSize:9.5,color:'#2A2825',lineHeight:1.2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1}}>
+              ${e.dueDate===iso?html`${e.important?html`<span style=${{color:PRIORITY_COLOR}}>★ </span>`:''}${e.text}`:' '}
+            </span>
+          </div>`)}
         ${eventsNoTime.map(e=>html`
           <div key=${e.id} draggable=${true} onDragStart=${ev=>startItemDrag(ev,e)} style=${{background:tint(e.projectColor),borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`3px solid ${e.projectColor}`,cursor:'grab'}} onClick=${ev=>openTaskPicker(ev,e)}>
             <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${e.important?html`<span style=${{color:PRIORITY_COLOR}}>★ </span>`:''}${e.text}</div>
@@ -1580,14 +1659,25 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
         ${DAY_NAMES.map((n,i)=>html`<div key=${n} style=${{textAlign:'center',padding:'4px 0',fontSize:9,letterSpacing:'0.5px',textTransform:'uppercase',color:i===today?'#2A2825':'#B0A898',fontWeight:600,borderRight:i<6?'1px solid #F0EBE5':'none'}}>${n}</div>`)}
       </div>
       <!-- One row per week -->
-      <div style=${{maxHeight:weeks>1?300:210,overflowY:'auto'}}>
+      <div ref=${rowsRef} style=${{height:calHeight||undefined,maxHeight:calHeight?undefined:(weeks>1?300:210),overflowY:'auto',display:'flex',flexDirection:'column'}}>
         ${Array.from({length:weeks}).map((_,w)=>html`
-          <div key=${w} style=${{display:'grid',gridTemplateColumns:'repeat(7,1fr)',borderTop:w>0?'1px solid #EAE4DC':'none',minHeight:80}}>
+          <div key=${w} style=${{display:'grid',gridTemplateColumns:'repeat(7,1fr)',borderTop:w>0?'1px solid #EAE4DC':'none',minHeight:80,flex:calHeight?'1 0 auto':'0 0 auto'}}>
             ${Array.from({length:7}).map((_,col)=>renderDayCell(w*7+col,weekDates[w*7+col]))}
           </div>`)}
       </div>
+      <!-- Height handle: drag to fix the calendar's height; double-tap resets to auto -->
+      ${onSetCalHeight&&html`<div onPointerDown=${startHeightDrag} onDblClick=${()=>onSetCalHeight(null)}
+        title="Drag to resize the calendar — double-tap to reset to automatic" role="separator"
+        style=${{height:9,cursor:'ns-resize',touchAction:'none',display:'flex',alignItems:'center',justifyContent:'center',background:'#FCFBF9',borderTop:'1px solid #F0EBE5'}}>
+        <div style=${{width:38,height:3,borderRadius:2,background:calHeight?'#B8AE9E':'#D8D0C8'}}/>
+      </div>`}
     </div>
     ${eventForm&&onSaveCalendarEvent&&html`<${CalEventForm} event=${eventForm==='new'?null:eventForm} onSave=${onSaveCalendarEvent} onDelete=${onDeleteCalendarEvent} onClose=${()=>setEventForm(null)}/>`}
+    ${pickerTask&&html`<div style=${{position:'fixed',top:pickerPos.top,left:pickerPos.left,zIndex:9999}}>
+      <${DayTimePicker} task=${pickerTask} isEvent=${pickerTask.kind==='event'} weeks=${weeks}
+        onAssign=${(day,time,end,endDate)=>{onAssignDay&&onAssignDay(pickerTask.id,day,time,end,pickerTask.kind,endDate);setPickerTask(null);}}
+        onClose=${()=>setPickerTask(null)}/>
+    </div>`}
     <//>`;
 };
 
@@ -1624,7 +1714,7 @@ const buildCopilotText=state=>{
     lines.push('','## '+p.name);
     t.forEach(x=>lines.push(`- [task] ${pri.has(x.id)?'★ ':''}${x.text}${due(x.dueDate)}`));
     r.forEach(x=>lines.push(`- [reminder] ${x.flagged?'⚑ ':''}${x.text}${due(x.dueDate)}`));
-    e.forEach(x=>lines.push(`- [event] ${x.text}${onDate(x.dueDate)}${x.taskTime?` at ${x.taskTime}`:''}`));
+    e.forEach(x=>lines.push(`- [event] ${x.text}${x.endDate&&x.dueDate?` (${isoToLong(x.dueDate)} to ${isoToLong(x.endDate)})`:onDate(x.dueDate)}${x.taskTime?` at ${fmtTime(x.taskTime)}`:''}`));
   });
   const cal=(state.calendarEvents||[]).filter(ev=>(ev.endDate||ev.startDate)>=tdy)
     .sort((a,b)=>(a.startDate||'').localeCompare(b.startDate||''));
@@ -1651,7 +1741,7 @@ const INSIGHT_STYLES = {
   summary: {label:'Summary',    color:'#7A6CA8',      bg:'#EEEAF6'},
 };
 
-const InsightCard = ({insight,projects,selectedProjectId,onSelectProject,important,onToggleImportant,text,onEditText,onAdd,onAddToNote,onDismiss}) => {
+const InsightCard = ({insight,projects,selectedProjectId,onSelectProject,important,onToggleImportant,text,onEditText,onAdd,onAddToNote,onDismiss,scheduledDate,onSetDate}) => {
   const st=INSIGHT_STYLES[insight.type]||INSIGHT_STYLES.action;
   const kinds=[['task','+ Task'],['reminder','+ Reminder'],['event','+ Event'],['note','+ Note']];
   const[noteMenuOpen,setNoteMenuOpen]=useState(false);
@@ -1659,7 +1749,7 @@ const InsightCard = ({insight,projects,selectedProjectId,onSelectProject,importa
   const autoH=el=>{if(el){el.style.height='auto';el.style.height=el.scrollHeight+'px';}};
   const val=(text!==undefined&&text!==null)?text:insight.text;
   const effText=()=>(val||'').trim();
-  const add=k=>{const t=effText();if(!t)return;onAdd({...insight,text:t},selectedProjectId,k,important);};
+  const add=k=>{const t=effText();if(!t)return;onAdd({...insight,text:t},selectedProjectId,k,important,scheduledDate||null);};
   const proj=projects.find(p=>p.id===selectedProjectId);
   const projNotes=proj?(proj.notes||[]):[];
   const noteLabel=n=>(n.title&&n.title.trim())||((n.text||'').trim().split('\n')[0].slice(0,38))||'Untitled note';
@@ -1691,6 +1781,16 @@ const InsightCard = ({insight,projects,selectedProjectId,onSelectProject,importa
             borderRadius:7,fontSize:14,lineHeight:1,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>
           ${important?'★':'☆'}
         </button>
+      </div>
+      <!-- Optional schedule: the created task/reminder/event lands on this
+           calendar day. A trailing @date in the text still works too. -->
+      <div style=${{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+        <span style=${{fontSize:10,letterSpacing:'0.5px',textTransform:'uppercase',color:'#B0A898',fontWeight:600,flexShrink:0}}>Schedule</span>
+        <input type="date" value=${scheduledDate||''} onInput=${e=>onSetDate(insight.id,e.target.value||null)}
+          title="Optional — put the new item on this day"
+          style=${{flex:1,minWidth:0,border:'1px solid #E0D8D0',borderRadius:7,padding:'4px 7px',fontSize:11.5,color:scheduledDate?'#2A2825':'#B0A898',background:'#FAFAF8',outline:'none'}}/>
+        ${scheduledDate&&html`<button onClick=${()=>onSetDate(insight.id,null)} title="Clear the date"
+          style=${{flexShrink:0,background:'none',border:'none',color:'#C0B8B0',fontSize:13,lineHeight:1,cursor:'pointer',padding:'0 2px'}}>×</button>`}
       </div>
       <div style=${{display:'flex',gap:4}}>
         ${kinds.map(([k,label])=>{
@@ -1769,6 +1869,7 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
   const[sel,setSel]=useState({}); // insightId -> projectId
   const[imp,setImp]=useState({}); // insightId -> bool (mark important on add)
   const[edits,setEdits]=useState({}); // insightId -> edited text
+  const[dates,setDates]=useState({}); // insightId -> 'YYYY-MM-DD' to schedule on add
   const[listening,setListening]=useState(false);
   const[busy,setBusy]=useState(null); // null | status string
   const[note,setNote]=useState(null); // transient info/error message
@@ -1955,6 +2056,7 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
     selectedProjectId=${projForInsight(ins)} onSelectProject=${selectProject}
     important=${!!imp[ins.id]} onToggleImportant=${toggleImportant}
     text=${textFor(ins)} onEditText=${editText}
+    scheduledDate=${dates[ins.id]||null} onSetDate=${(id,v)=>setDates(s=>({...s,[id]:v}))}
     onAdd=${onAdd} onAddToNote=${onAddToNote} onDismiss=${onDismiss}/>`;
   const gripHandle=(i)=>html`<div draggable=${true}
     onDragStart=${e=>{setDragIdx(i);try{e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',String(i));}catch(_){}}}
@@ -2178,7 +2280,8 @@ const App = () => {
   const[masterWidth,setMasterWidth]=useState(()=>loadPrefs().masterWidth||260);
   const[brainWidth,setBrainWidth]=useState(()=>loadPrefs().brainWidth||312);
   const[zoom,setZoom]=useState(()=>loadPrefs().zoom||1);
-  useEffect(()=>{savePrefs({...loadPrefs(),masterWidth,brainWidth,zoom});},[masterWidth,brainWidth,zoom]);
+  const[calHeight,setCalHeight]=useState(()=>loadPrefs().calHeight||null); // null = auto
+  useEffect(()=>{savePrefs({...loadPrefs(),masterWidth,brainWidth,zoom,calHeight});},[masterWidth,brainWidth,zoom,calHeight]);
   const stepZoom=d=>setZoom(z=>Math.min(1.6,Math.max(0.6,Math.round((z+d)*10)/10)));
   const[insights,setInsights]=useState(SAMPLE_INSIGHTS);
   const fileRef=useRef(null);
@@ -2188,10 +2291,11 @@ const App = () => {
   const channelRef=useRef(null);
   const bootedRef=useRef(false);
 
-  // Seed the app from a state blob (local cache or server). Expands every project.
+  // Seed the app from a state blob (local cache or server), honoring the
+  // persisted collapsed list.
   const bootState=saved=>{
-    if(saved){const s=purgeOldCompleted(saved);setState(s);setExpandedIds(new Set(s.projects?.map(p=>p.id)||[]));}
-    else{const s=makeSeed();setState(s);setExpandedIds(new Set(s.projects.map(p=>p.id)));}
+    const s=saved?purgeOldCompleted(saved):makeSeed();
+    setState(s);setExpandedIds(expandedFromState(s));
     setLoaded(true);
   };
   // A change pushed by ANOTHER device. Adopt it without echoing a save back up.
@@ -2234,7 +2338,7 @@ const App = () => {
       saveLocal(s,chosenTs);
       skipSave.current=true; // we already pushed during boot — don't re-push on first render
       setState(s);
-      setExpandedIds(new Set(s.projects?.map(p=>p.id)||[]));
+      setExpandedIds(expandedFromState(s));
       setSyncStatus(reachable?'synced':'connecting');
     }catch(e){
       bootState(loadLocal()); // last-ditch: render from local so we never hang
@@ -2320,7 +2424,22 @@ const App = () => {
     upProjects([...projects,np]);setExpandedIds(prev=>new Set([...prev,np.id]));
     setNewProjectName('');setAddingProject(false);
   };
-  const toggleExp=id=>setExpandedIds(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
+  // Expand/collapse writes through to state.collapsedIds so it survives
+  // refreshes and sign-ins (and syncs across devices with everything else).
+  const toggleExp=id=>{
+    const wasExpanded=expandedIds.has(id);
+    setExpandedIds(prev=>{const n=new Set(prev);wasExpanded?n.delete(id):n.add(id);return n;});
+    setState(s=>{
+      const rest=(s.collapsedIds||[]).filter(x=>x!==id);
+      return{...s,collapsedIds:wasExpanded?[...rest,id]:rest};
+    });
+  };
+  // Reveal a project (e.g. when a Brain item lands in it) in the UI AND in
+  // the persisted collapsed list, so it doesn't re-collapse on refresh.
+  const expandProject=id=>{
+    setExpandedIds(prev=>prev.has(id)?prev:new Set([...prev,id]));
+    setState(s=>(s.collapsedIds||[]).includes(id)?{...s,collapsedIds:s.collapsedIds.filter(x=>x!==id)}:s);
+  };
   const masterToggleDone=(pid,tid)=>upProjects(projects.map(p=>{if(p.id!==pid)return p;const tasks=p.tasks.map(t=>t.id===tid?{...t,done:!t.done,archived:false,completedAt:!t.done?Date.now():null}:t);return{...p,tasks:[...tasks.filter(t=>!t.done),...tasks.filter(t=>t.done)]};}));
   const masterToggleReminderDone=(pid,rid)=>upProjects(projects.map(p=>{if(p.id!==pid)return p;const reminders=(p.reminders||[]).map(r=>r.id===rid?{...r,done:!r.done,archived:false,completedAt:!r.done?Date.now():null}:r);return{...p,reminders:[...reminders.filter(r=>!r.done),...reminders.filter(r=>r.done)]};}));
   const masterToggleEventDone=(pid,eid)=>upProjects(projects.map(p=>{if(p.id!==pid)return p;const events=(p.events||[]).map(e=>e.id===eid?{...e,done:!e.done,archived:false,completedAt:!e.done?Date.now():null}:e);return{...p,events:[...events.filter(e=>!e.done),...events.filter(e=>e.done)]};}));
@@ -2340,9 +2459,10 @@ const App = () => {
      This is the integration: a suggestion becomes a real planner
      item (tagged fromBrainy) and immediately flows everywhere the
      planner reads from state — master list, project strip, calendar. */
-  const addInsightToPlanner=(insight,projectId,kind,important=false)=>{
+  const addInsightToPlanner=(insight,projectId,kind,important=false,scheduledDate=null)=>{
     const newId=uid();
-    const {text:cleanText,due}=extractDue(insight.text); // honor a trailing @date
+    const {text:cleanText,due:textDue}=extractDue(insight.text); // honor a trailing @date
+    const due=scheduledDate||textDue; // the card's explicit Schedule date wins
     setState(s=>{
       const projects=s.projects.map(p=>{
         if(p.id!==projectId)return p;
@@ -2356,7 +2476,7 @@ const App = () => {
       const priorityIds=(kind==='task'&&important)?[...(s.priorityIds||[]),newId]:s.priorityIds;
       return{...s,projects,priorityIds};
     });
-    if(!expandedIds.has(projectId))setExpandedIds(prev=>new Set([...prev,projectId]));
+    expandProject(projectId);
     setInsights(prev=>prev.filter(i=>i.id!==insight.id));
   };
   const addInsightToExistingNote=(insight,projectId,noteId)=>{
@@ -2370,7 +2490,7 @@ const App = () => {
         return{...n,text:(n.text||'')+sep+'• '+add,collapsed:false};
       })};
     })}));
-    if(!expandedIds.has(projectId))setExpandedIds(prev=>new Set([...prev,projectId]));
+    expandProject(projectId);
     setInsights(prev=>prev.filter(i=>i.id!==insight.id));
   };
   const dismissInsight=id=>setInsights(prev=>prev.filter(i=>i.id!==id));
@@ -2409,7 +2529,7 @@ const App = () => {
               ?{label:'🔑 Passkey on (this device)',onClick:()=>{}}
               :{label:'🔑 Set up a passkey',onClick:()=>{tryRegisterPasskey();}}]:[]),
           ]}/>
-          <input ref=${fileRef} type="file" accept=".json" style=${{display:'none'}} onChange=${e=>{const f=e.target.files?.[0];if(f)importBackup(f,s=>{setState(s);setExpandedIds(new Set(s.projects?.map(p=>p.id)||[]));});e.target.value='';}}/>
+          <input ref=${fileRef} type="file" accept=".json" style=${{display:'none'}} onChange=${e=>{const f=e.target.files?.[0];if(f)importBackup(f,s=>{setState(s);setExpandedIds(expandedFromState(s));});e.target.value='';}}/>
           ${syncEnabled&&session&&html`<div style=${{display:'flex',alignItems:'center',gap:7,marginLeft:2}}>
             <span title=${syncStatus==='synced'?'Synced across devices':'Connecting…'} style=${{width:8,height:8,borderRadius:'50%',background:syncStatus==='synced'?'#5E9E5E':'#C9A227',flexShrink:0}}/>
             <${AddPasskeyButton}/>
@@ -2433,10 +2553,20 @@ const App = () => {
           <${WeekCalendar} projects=${projects} priorityIds=${priorityIds} weeks=${weeksToShow} onSetWeeks=${setWeeks}
             calendarEvents=${calendarEvents} onSaveCalendarEvent=${saveCalendarEvent} onDeleteCalendarEvent=${deleteCalendarEvent}
             calCollapsed=${calCollapsed} onToggleCalendar=${()=>setCalCollapsed(p=>!p)}
-            onAssignDay=${(tid,day,time,end,kind)=>{
+            calHeight=${calHeight} onSetCalHeight=${setCalHeight} zoom=${zoom}
+            onAssignDay=${(tid,day,time,end,kind,endDate)=>{
               if(kind==='event'){
                 const proj=projects.find(p=>(p.events||[]).some(e=>e.id===tid));
-                if(proj)upProjects(projects.map(p=>p.id===proj.id?{...p,events:(p.events||[]).map(e=>e.id===tid?{...e,dueDate:day,taskTime:time,endTime:end}:e)}:p));
+                if(proj)upProjects(projects.map(p=>p.id===proj.id?{...p,events:(p.events||[]).map(e=>{
+                  if(e.id!==tid)return e;
+                  // Picker passes an explicit last day (or null to clear); a
+                  // day-to-day drag omits it — shift the span to keep its length.
+                  const ne=endDate!==undefined?endDate
+                    :(e.endDate&&e.dueDate&&day)
+                      ?new Date(new Date(day).getTime()+(new Date(e.endDate).getTime()-new Date(e.dueDate).getTime())).toISOString().slice(0,10)
+                      :null;
+                  return{...e,dueDate:day,taskTime:time,endTime:end,endDate:ne};
+                })}:p));
               } else if(kind==='reminder'){
                 const proj=projects.find(p=>(p.reminders||[]).some(r=>r.id===tid));
                 if(proj)upProjects(projects.map(p=>p.id===proj.id?{...p,reminders:(p.reminders||[]).map(r=>r.id===tid?{...r,dueDate:day,taskTime:time,endTime:end}:r)}:p));
