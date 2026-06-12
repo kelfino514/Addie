@@ -98,6 +98,12 @@ const saveLocal=(s,ts)=>{try{localStorage.setItem(SKEY,JSON.stringify(s));if(ts)
 const loadLocal=()=>{try{const r=localStorage.getItem(SKEY);if(r)return JSON.parse(r);}catch(e){}return null;};
 const loadLocalTs=()=>{try{return localStorage.getItem(TSKEY);}catch(e){return null;}};
 
+// Per-device UI prefs (panel widths). Kept local and NOT synced — layout
+// preference is device-specific (wide monitor vs phone).
+const PREFS_KEY='unified-ui-v1';
+const loadPrefs=()=>{try{return JSON.parse(localStorage.getItem(PREFS_KEY))||{};}catch(e){return {};}};
+const savePrefs=p=>{try{localStorage.setItem(PREFS_KEY,JSON.stringify(p));}catch(e){}};
+
 /* Sync layer — dormant unless configured. supabase-js is lazy-loaded so
    the local-only path ships zero extra dependencies. */
 const WRITER_ID=uid()+uid();   // unique per tab — lets us ignore our own realtime echoes
@@ -996,7 +1002,7 @@ const MasterItem = ({item,onToggleDone,onToggleReminderDone,onToggleEventDone,on
     <//>`;
 };
 
-const MasterPanel = ({projects,priorityIds,onToggleDone,onTogglePriority,onToggleReminderDone,onToggleEventDone,onAssignDay,onReorderPriority,onEmptyCompleted,completedExpanded,onToggleCompleted,collapsed,onToggleCollapse,weeks=1}) => {
+const MasterPanel = ({projects,priorityIds,onToggleDone,onTogglePriority,onToggleReminderDone,onToggleEventDone,onAssignDay,onReorderPriority,onEmptyCompleted,completedExpanded,onToggleCompleted,collapsed,onToggleCollapse,weeks=1,width=260}) => {
   const[confirmEmpty,setConfirmEmpty]=useState(false);
   const[priDragOver,setPriDragOver]=useState(null);
   const priDragId=useRef(null);
@@ -1023,7 +1029,7 @@ const MasterPanel = ({projects,priorityIds,onToggleDone,onTogglePriority,onToggl
     </div>`;
 
   return html`
-    <div style=${{width:'25%',minWidth:200,maxWidth:300,flexShrink:0,borderRight:'1px solid #EAE4DC',background:'#FAFAF8',display:'flex',flexDirection:'column'}}>
+    <div style=${{width,flexShrink:0,borderRight:'1px solid #EAE4DC',background:'#FAFAF8',display:'flex',flexDirection:'column'}}>
       <div style=${{padding:'14px 14px 10px',borderBottom:'1px solid #EAE4DC',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
         <span style=${{fontFamily:"'DM Serif Display',serif",fontSize:15,fontWeight:400}}>Master List</span>
         <button onClick=${onToggleCollapse} style=${{background:'none',border:'none',color:'#C0B8B0',fontSize:12,cursor:'pointer'}}>◁</button>
@@ -1594,7 +1600,7 @@ async function transcribeBlob(blob,name){
   return (await res.json()).text||'';
 }
 
-const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,onReorder,collapsed,onToggleCollapse}) => {
+const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,onReorder,collapsed,onToggleCollapse,width=312}) => {
   const[capture,setCapture]=useState('');
   const[sel,setSel]=useState({}); // insightId -> projectId
   const[imp,setImp]=useState({}); // insightId -> bool (mark important on add)
@@ -1774,7 +1780,7 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
 
   return html`
     <${Fragment}>
-    <div style=${{width:312,flexShrink:0,borderLeft:'1px solid #EAE4DC',background:'#F7F5F1',display:'flex',flexDirection:'column'}}>
+    <div style=${{width,flexShrink:0,borderLeft:'1px solid #EAE4DC',background:'#F7F5F1',display:'flex',flexDirection:'column'}}>
       <div style=${{padding:'13px 14px 11px',borderBottom:'1px solid #EAE4DC',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
         <div style=${{display:'flex',alignItems:'center',gap:7}}>
           <div>
@@ -1920,6 +1926,32 @@ const AddPasskeyButton = () => {
     ${st==='busy'?'Adding…':st==='err'?'Retry passkey':'＋ Add passkey'}</button>`;
 };
 
+/* Draggable divider that resizes an adjacent side panel. dir=+1 grows the
+   panel when dragged right (left/Master panel), dir=-1 grows it when dragged
+   left (right/Brain panel). maxByWindow keeps the center from being squeezed. */
+const PanelResizer = ({width,setWidth,dir,min,max,maxByWindow}) => {
+  const[hov,setHov]=useState(false);
+  const onDown=e=>{
+    e.preventDefault();
+    const startX=e.clientX,startW=width;
+    const move=ev=>{
+      const hi=Math.min(max,maxByWindow?maxByWindow():max);
+      setWidth(Math.round(Math.max(min,Math.min(hi,startW+dir*(ev.clientX-startX)))));
+    };
+    const up=()=>{
+      window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);
+      document.body.style.cursor='';document.body.style.userSelect='';
+    };
+    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
+    document.body.style.cursor='col-resize';document.body.style.userSelect='none';
+  };
+  return html`<div onPointerDown=${onDown} onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)}
+    title="Drag to resize" role="separator"
+    style=${{width:7,flexShrink:0,cursor:'col-resize',touchAction:'none',position:'relative',display:'flex',justifyContent:'center',background:'transparent'}}>
+    <div style=${{width:hov?3:1,background:hov?'#B8AE9E':'#EAE4DC',transition:'width 0.12s, background 0.12s'}}/>
+  </div>`;
+};
+
 const App = () => {
   const[state,setState]=useState(null);
   const[loaded,setLoaded]=useState(false);
@@ -1933,6 +1965,9 @@ const App = () => {
   const[openColorPickerId,setOpenColorPickerId]=useState(null);
   const[calCollapsed,setCalCollapsed]=useState(false);
   const[brainyCollapsed,setBrainyCollapsed]=useState(false);
+  const[masterWidth,setMasterWidth]=useState(()=>loadPrefs().masterWidth||260);
+  const[brainWidth,setBrainWidth]=useState(()=>loadPrefs().brainWidth||312);
+  useEffect(()=>{savePrefs({...loadPrefs(),masterWidth,brainWidth});},[masterWidth,brainWidth]);
   const[insights,setInsights]=useState(SAMPLE_INSIGHTS);
   const fileRef=useRef(null);
   const debouncedSaveRef=useRef(debounce(saveState,1200));
@@ -2146,7 +2181,9 @@ const App = () => {
           completedExpanded=${completedExpanded}
           onToggleCompleted=${()=>upState({completedExpanded:!completedExpanded})}
           onAssignDay=${assignDayFromMaster} weeks=${weeksToShow}
-          collapsed=${masterCollapsed} onToggleCollapse=${()=>setMasterCollapsed(p=>!p)}/>
+          collapsed=${masterCollapsed} onToggleCollapse=${()=>setMasterCollapsed(p=>!p)} width=${masterWidth}/>
+        ${!masterCollapsed&&html`<${PanelResizer} width=${masterWidth} setWidth=${setMasterWidth} dir=${1} min=${180} max=${560}
+          maxByWindow=${()=>window.innerWidth-(brainyCollapsed?30:brainWidth)-320}/>`}
         <div style=${{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
           <${WeekCalendar} projects=${projects} priorityIds=${priorityIds} weeks=${weeksToShow} onSetWeeks=${setWeeks}
             calCollapsed=${calCollapsed} onToggleCalendar=${()=>setCalCollapsed(p=>!p)}
@@ -2173,9 +2210,11 @@ const App = () => {
             renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow}/>`}/>
           </div>
         </div>
+        ${!brainyCollapsed&&html`<${PanelResizer} width=${brainWidth} setWidth=${setBrainWidth} dir=${-1} min=${240} max=${600}
+          maxByWindow=${()=>window.innerWidth-(masterCollapsed?28:masterWidth)-320}/>`}
         <${BrainySidebar} insights=${insights} projects=${projects}
           onAdd=${addInsightToPlanner} onAddToNote=${addInsightToExistingNote} onDismiss=${dismissInsight} onCapture=${addCapturedInsights}
-          onReorder=${setInsights}
+          onReorder=${setInsights} width=${brainWidth}
           collapsed=${brainyCollapsed} onToggleCollapse=${()=>setBrainyCollapsed(p=>!p)}/>
       </div>
     </div>`;
