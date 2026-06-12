@@ -76,12 +76,62 @@ const ICON_BTN={background:'none',border:'none',cursor:'pointer',lineHeight:1,fl
 const ICON_SLOT={width:20,height:20,flexShrink:0}; // empty placeholder to keep columns aligned
 
 /* ── Storage ───────────────────────────────────────────────────
-   Single seam for persistence. Today: localStorage.
-   Phase 3: swap saveState/loadState for a Supabase adapter
-   (same signatures) to get cross-device sync — no UI changes. */
-const SKEY='unified-v1';
-const saveState = s => { try{localStorage.setItem(SKEY,JSON.stringify(s));}catch(e){} };
-const loadState = () => { try{const r=localStorage.getItem(SKEY);if(r)return JSON.parse(r);}catch(e){}return null; };
+   Single seam for persistence. localStorage is the offline cache /
+   instant-load layer; Supabase (configured below) layers cross-device
+   sync on top. When Supabase isn't configured, the app runs exactly as
+   before — pure localStorage, no auth, no extra dependencies. */
+
+/* Paste this Supabase project's values to turn on cross-device sync.
+   The anon key is a PUBLIC key — safe to ship in the client; Row Level
+   Security scopes every row to its signed-in owner. Leave both blank to
+   run local-only (no sign-in). */
+const SUPABASE_URL='';
+const SUPABASE_ANON_KEY='';
+const syncEnabled=!!(SUPABASE_URL&&SUPABASE_ANON_KEY);
+
+const SKEY='unified-v1', TSKEY='unified-v1:ts';
+const saveLocal=(s,ts)=>{try{localStorage.setItem(SKEY,JSON.stringify(s));if(ts)localStorage.setItem(TSKEY,ts);}catch(e){}};
+const loadLocal=()=>{try{const r=localStorage.getItem(SKEY);if(r)return JSON.parse(r);}catch(e){}return null;};
+const loadLocalTs=()=>{try{return localStorage.getItem(TSKEY);}catch(e){return null;}};
+
+/* Sync layer — dormant unless configured. supabase-js is lazy-loaded so
+   the local-only path ships zero extra dependencies. */
+const WRITER_ID=uid()+uid();   // unique per tab — lets us ignore our own realtime echoes
+let _syncUserId=null;          // set once signed in; gates remote writes
+let _supaP=null;
+const getSupa=()=>{
+  if(!_supaP)_supaP=import('https://esm.sh/@supabase/supabase-js@2.45.0')
+    .then(({createClient})=>createClient(SUPABASE_URL,SUPABASE_ANON_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}}));
+  return _supaP;
+};
+const sendOtp=email=>getSupa().then(s=>s.auth.signInWithOtp({email,options:{shouldCreateUser:true}}));
+const verifyOtp=(email,token)=>getSupa().then(s=>s.auth.verifyOtp({email,token,type:'email'}));
+const signOutSync=()=>getSupa().then(s=>s.auth.signOut());
+const pullRemote=async userId=>{
+  const s=await getSupa();
+  const{data,error}=await s.from('app_state').select('data,updated_at').eq('user_id',userId).maybeSingle();
+  if(error)throw error;return data; // {data,updated_at} | null
+};
+const pushRemote=async(userId,state,ts)=>{
+  const s=await getSupa();
+  return s.from('app_state').upsert({user_id:userId,data:state,writer_id:WRITER_ID,updated_at:ts||new Date().toISOString()});
+};
+const subscribeRemote=async(userId,onRemote)=>{
+  const s=await getSupa();
+  return s.channel('app_state:'+userId)
+    .on('postgres_changes',{event:'*',schema:'public',table:'app_state',filter:'user_id=eq.'+userId},
+      p=>{const row=p.new;if(row&&row.writer_id!==WRITER_ID&&row.data)onRemote(row.data,row.updated_at);})
+    .subscribe();
+};
+
+/* The persistence seam the app calls. Always writes the local cache, and
+   (when signed in) pushes the same blob to Supabase with a matching
+   timestamp. Both are debounced together by the caller. */
+const saveState=s=>{
+  const ts=new Date().toISOString();
+  saveLocal(s,ts);
+  if(syncEnabled&&_syncUserId)pushRemote(_syncUserId,s,ts).catch(()=>{});
+};
 const exportBackup = s => {
   const b=new Blob([JSON.stringify(s,null,2)],{type:'application/json'});
   const u=URL.createObjectURL(b),a=document.createElement('a');
@@ -1810,9 +1860,61 @@ const OverflowMenu = ({items}) => {
     </div>`;
 };
 
+/* ── Auth Gate ─────────────────────────────────────────────────
+   Email one-time-code sign-in. Rendered only when sync is configured
+   and there's no session yet. A clicked magic link in the same email
+   also works (detectSessionInUrl). */
+const AuthGate = () => {
+  const[email,setEmail]=useState('');
+  const[code,setCode]=useState('');
+  const[step,setStep]=useState('email'); // 'email' | 'code'
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const INPUT={width:'100%',border:'1.5px solid #E0D8D0',borderRadius:9,padding:'11px 13px',fontSize:14,outline:'none',color:'#2A2825',background:'#FCFBF9',marginBottom:12,display:'block'};
+  const BTN=b=>({width:'100%',background:b?'#8A8078':'#2A2825',color:'#F4F1ED',border:'none',borderRadius:9,padding:'11px',fontSize:14,fontWeight:500,cursor:b?'default':'pointer'});
+  const send=async()=>{
+    const e=email.trim();
+    if(!e){setErr('Enter your email.');return;}
+    setBusy(true);setErr('');
+    try{const{error}=await sendOtp(e);if(error)throw error;setStep('code');}
+    catch(ex){setErr(ex?.message||'Could not send the code.');}
+    finally{setBusy(false);}
+  };
+  const verify=async()=>{
+    const c=code.trim();
+    if(!c){setErr('Enter the 6-digit code.');return;}
+    setBusy(true);setErr('');
+    try{const{error}=await verifyOtp(email.trim(),c);if(error)throw error;/* onAuthStateChange takes over */}
+    catch(ex){setErr(ex?.message||'That code didn’t work — check it and try again.');setBusy(false);}
+  };
+  return html`
+    <div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',background:'#F4F1ED',padding:20}}>
+      <div style=${{background:'white',borderRadius:16,padding:'30px 30px 26px',width:'min(380px,92vw)',boxShadow:'0 16px 48px rgba(0,0,0,0.12)'}}>
+        <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:24,marginBottom:6}}>Planner</div>
+        <div style=${{fontSize:13,color:'#7A7068',marginBottom:22,lineHeight:1.5}}>
+          ${step==='email'?'Sign in to sync your planner across devices.':html`Enter the 6-digit code we emailed to <b>${email.trim()}</b>. <span style=${{color:'#9A9088'}}>(Or just click the link in that email.)</span>`}
+        </div>
+        ${step==='email'?html`
+          <input type="email" autoFocus value=${email} onInput=${e=>setEmail(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')send();}}
+            placeholder="you@email.com" style=${INPUT}/>
+          <button onClick=${send} disabled=${busy} style=${BTN(busy)}>${busy?'Sending…':'Send code'}</button>
+        `:html`
+          <input inputMode="numeric" autoFocus value=${code} onInput=${e=>setCode(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')verify();}}
+            placeholder="123456" style=${{...INPUT,letterSpacing:'4px',textAlign:'center',fontSize:18}}/>
+          <button onClick=${verify} disabled=${busy} style=${BTN(busy)}>${busy?'Verifying…':'Verify & sign in'}</button>
+          <button onClick=${()=>{setStep('email');setCode('');setErr('');}} style=${{background:'none',border:'none',color:'#9A9088',fontSize:12,cursor:'pointer',marginTop:12,textDecoration:'underline'}}>Use a different email</button>
+        `}
+        ${err&&html`<div style=${{color:'#A0291E',fontSize:12,marginTop:12,lineHeight:1.4}}>${err}</div>`}
+      </div>
+    </div>`;
+};
+
 const App = () => {
   const[state,setState]=useState(null);
   const[loaded,setLoaded]=useState(false);
+  const[session,setSession]=useState(null);
+  const[authReady,setAuthReady]=useState(!syncEnabled); // local-only: nothing to wait for
+  const[syncStatus,setSyncStatus]=useState(syncEnabled?'connecting':'off'); // off|connecting|synced
   const[masterCollapsed,setMasterCollapsed]=useState(false);
   const[expandedIds,setExpandedIds]=useState(new Set());
   const[addingProject,setAddingProject]=useState(false);
@@ -1824,16 +1926,82 @@ const App = () => {
   const fileRef=useRef(null);
   const debouncedSaveRef=useRef(debounce(saveState,1200));
   const debouncedSave=debouncedSaveRef.current;
+  const skipSave=useRef(false); // suppress the save-echo when state arrives FROM the server
 
-  useEffect(()=>{
-    const saved=loadState();
+  // Seed the app from a state blob (local cache or server). Expands every project.
+  const bootState=saved=>{
     if(saved){const s=purgeOldCompleted(saved);setState(s);setExpandedIds(new Set(s.projects?.map(p=>p.id)||[]));}
     else{const s=makeSeed();setState(s);setExpandedIds(new Set(s.projects.map(p=>p.id)));}
     setLoaded(true);
-  },[]);
-  useEffect(()=>{if(loaded&&state)debouncedSave(state);},[state,loaded]);
+  };
+  // A change pushed by ANOTHER device. Adopt it without echoing a save back up.
+  const adoptRemote=(data,ts)=>{
+    const s=purgeOldCompleted(data);
+    saveLocal(s,ts||new Date().toISOString());
+    skipSave.current=true;
+    setState(s);
+    setExpandedIds(prev=>{const n=new Set(prev);(s.projects||[]).forEach(p=>{if(!prev.has(p.id))n.add(p.id);});return n;});
+  };
 
-  if(!loaded||!state)return html`<div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',color:'#B0A898',fontSize:14}}>Loading…</div>`;
+  useEffect(()=>{
+    if(!syncEnabled){bootState(loadLocal());return;}
+    let channel=null,authSub=null,started=false;
+    // First sign-in or returning: reconcile local cache vs server (newer wins),
+    // migrate local up if the server has nothing yet, then subscribe to changes.
+    const bootSynced=async userId=>{
+      _syncUserId=userId;
+      const local=loadLocal(),localTs=loadLocalTs();
+      let row=null;try{row=await pullRemote(userId);}catch(e){setSyncStatus('connecting');}
+      const hasRemote=row&&row.data&&Object.keys(row.data).length;
+      let chosen,chosenTs;
+      if(hasRemote&&local&&localTs&&row.updated_at&&new Date(localTs).getTime()>new Date(row.updated_at).getTime()){
+        chosen=local;chosenTs=localTs;try{await pushRemote(userId,local,localTs);}catch(e){}
+      }else if(hasRemote){
+        chosen=row.data;chosenTs=row.updated_at;
+      }else if(local){
+        chosen=local;chosenTs=localTs||new Date().toISOString();try{await pushRemote(userId,local,chosenTs);}catch(e){}
+      }else{
+        chosen=makeSeed();chosenTs=new Date().toISOString();try{await pushRemote(userId,chosen,chosenTs);}catch(e){}
+      }
+      const s=purgeOldCompleted(chosen);
+      saveLocal(s,chosenTs);
+      skipSave.current=true; // we already pushed during boot — don't re-push on first render
+      setState(s);
+      setExpandedIds(new Set(s.projects?.map(p=>p.id)||[]));
+      setLoaded(true);
+      setSyncStatus('synced');
+      try{channel=await subscribeRemote(userId,adoptRemote);}catch(e){}
+    };
+    (async()=>{
+      const supa=await getSupa();
+      const{data:{subscription}}=supa.auth.onAuthStateChange(async(_e,sess)=>{
+        setSession(sess);setAuthReady(true);
+        if(sess&&!started){started=true;await bootSynced(sess.user.id);}
+        else if(!sess&&started){ // signed out — drop back to the gate
+          started=false;_syncUserId=null;
+          if(channel){try{supa.removeChannel(channel);}catch(e){}channel=null;}
+          setLoaded(false);setState(null);setSyncStatus('connecting');
+        }
+      });
+      authSub=subscription;
+      const{data:{session:sess}}=await supa.auth.getSession();
+      setSession(sess);setAuthReady(true);
+      if(sess&&!started){started=true;await bootSynced(sess.user.id);}
+    })();
+    return ()=>{try{authSub?.unsubscribe();}catch(e){}};
+  },[]);
+
+  // Persist on every change — but skip the render that came FROM the server.
+  useEffect(()=>{
+    if(!loaded||!state)return;
+    if(skipSave.current){skipSave.current=false;return;}
+    debouncedSave(state);
+  },[state,loaded]);
+
+  const Loading=t=>html`<div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',color:'#B0A898',fontSize:14}}>${t}</div>`;
+  if(syncEnabled&&!authReady)return Loading('Connecting…');
+  if(syncEnabled&&!session)return html`<${AuthGate}/>`;
+  if(!loaded||!state)return Loading('Loading…');
 
   const{projects,priorityIds=[],completedExpanded=false,weeksToShow=1}=state;
   const upState=p=>setState(s=>({...s,...p}));
@@ -1929,6 +2097,11 @@ const App = () => {
             {label:'Import',onClick:()=>fileRef.current?.click()},
           ]}/>
           <input ref=${fileRef} type="file" accept=".json" style=${{display:'none'}} onChange=${e=>{const f=e.target.files?.[0];if(f)importBackup(f,s=>{setState(s);setExpandedIds(new Set(s.projects?.map(p=>p.id)||[]));});e.target.value='';}}/>
+          ${syncEnabled&&session&&html`<div style=${{display:'flex',alignItems:'center',gap:7,marginLeft:2}}>
+            <span title=${syncStatus==='synced'?'Synced across devices':'Connecting…'} style=${{width:8,height:8,borderRadius:'50%',background:syncStatus==='synced'?'#5E9E5E':'#C9A227',flexShrink:0}}/>
+            <button onClick=${()=>signOutSync()} title=${'Signed in as '+(session.user?.email||'')+' — sign out'}
+              style=${{background:'none',border:'1px solid #E0D8D0',borderRadius:16,padding:'6px 12px',fontSize:12,color:'#7A7068',cursor:'pointer'}}>Sign out</button>
+          </div>`}
         </div>
       </header>
       <div style=${{flex:1,display:'flex',overflow:'hidden'}}>
