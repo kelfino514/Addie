@@ -70,6 +70,10 @@ const PRIORITY_COLOR='#D4758A', PRIORITY_BG='#FFF8E1';
 const REMINDER_COLOR='#5B8FBF', REMINDER_BG='#EEF4FB';
 const PROJECT_COLORS=['#2A2825','#5C5650','#8C8480','#FFFFFF','#F4F1ED','#C8B8A2','#A8BBA8','#B8C4CC','#C4B8C8','#CCBFB0','#A8C4BC','#F7D9D9','#FAE5CC','#FDF3CC','#E8F5D9','#D9EBF7','#D9D9F7','#F0D9F7','#D9F0F7'];
 const STANDARD_COLORS=['#FFF3BF','#D4EAD4','#D6E8F5','#F5D6E8','#EDE0D4','#E8D6F5','#FFE4CC','#D4E8E8'];
+// Calendar-event swatches: the standard pastels plus a muted "FYI" gray for
+// non-actionable day notes (partner on PTO, no-travel days, etc.).
+const FYI_COLOR='#CFCAC2';
+const CAL_EVENT_COLORS=[...STANDARD_COLORS,FYI_COLOR];
 /* Uniform fixed-width slot for trailing row icons (calendar / star / flag / delete)
    so they line up into clean columns against the right margin across every row. */
 const ICON_BTN={background:'none',border:'none',cursor:'pointer',lineHeight:1,flexShrink:0,width:20,height:20,padding:0,display:'flex',alignItems:'center',justifyContent:'center',transition:'color 0.15s'};
@@ -1335,11 +1339,64 @@ const DayTimePicker = ({task,onAssign,onClose,isEvent=false,weeks=1}) => {
 };
 
 /* ── Week Calendar Strip ────────────────────────────────────── */
-const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssignDay,weeks=1,onSetWeeks}) => {
+/* A standalone calendar event chip (not tied to a project). Spans multiple
+   days as a colored bar — name shown on the first day only, plain color on the
+   continuation days. Hover reveals an × to delete the whole event. */
+const CalEventChip = ({ev,isStart,onDelete}) => {
+  const[hov,setHov]=useState(false);
+  const fyi=ev.color===FYI_COLOR;
+  return html`<div onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)}
+    style=${{position:'relative',background:ev.color,borderRadius:4,padding:'2px 5px',marginBottom:3,minHeight:15,display:'flex',alignItems:'center',
+      borderLeft:isStart?`2px solid ${darken(ev.color)}`:'none',opacity:fyi?0.85:1}}>
+    <span style=${{fontSize:9.5,color:fyi?'#6A625A':'#2A2825',fontStyle:fyi?'italic':'normal',lineHeight:1.2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1}}>
+      ${isStart?ev.text:' '}
+    </span>
+    ${hov&&onDelete&&html`<button onClick=${e=>{e.stopPropagation();onDelete(ev.id);}} title="Delete event"
+      style=${{position:'absolute',right:1,top:'50%',transform:'translateY(-50%)',background:'rgba(255,255,255,0.75)',border:'none',borderRadius:3,color:'#A0291E',fontSize:11,lineHeight:1,cursor:'pointer',padding:'0 3px'}}>×</button>`}
+  </div>`;
+};
+
+/* Modal form for creating a standalone calendar event: name, start/end dates
+   (native date inputs — reliable on iPad), and a color incl. the FYI gray. */
+const CalEventForm = ({onAdd,onClose}) => {
+  const today=todayISO();
+  const[name,setName]=useState('');
+  const[start,setStart]=useState(today);
+  const[end,setEnd]=useState(today);
+  const[color,setColor]=useState(CAL_EVENT_COLORS[0]);
+  const inp={border:'1px solid #E0D8D0',borderRadius:7,padding:'7px 9px',fontSize:13,outline:'none',color:'#2A2825',background:'white',width:'100%'};
+  const submit=()=>{const t=name.trim();if(!t)return;let s=start||today,e=end||s;if(e<s)e=s;onAdd({text:t,startDate:s,endDate:e,color});onClose();};
+  return html`
+    <div style=${{position:'fixed',inset:0,zIndex:3000,background:'rgba(42,40,37,0.45)',display:'flex',alignItems:'center',justifyContent:'center'}} onClick=${onClose}>
+      <div onClick=${e=>e.stopPropagation()} style=${{background:'white',borderRadius:14,padding:'20px 22px',width:'min(360px,92vw)',boxShadow:'0 16px 48px rgba(0,0,0,0.2)'}}>
+        <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:18,marginBottom:14}}>New calendar event</div>
+        <input autoFocus value=${name} onInput=${e=>setName(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')submit();}} placeholder="Event name…" style=${{...inp,marginBottom:12}}/>
+        <div style=${{display:'flex',gap:10,marginBottom:14}}>
+          <label style=${{flex:1,fontSize:11,color:'#7A7068',fontWeight:600}}>Start<input type="date" value=${start} onInput=${e=>{setStart(e.target.value);if(end<e.target.value)setEnd(e.target.value);}} style=${{...inp,marginTop:4}}/></label>
+          <label style=${{flex:1,fontSize:11,color:'#7A7068',fontWeight:600}}>End<input type="date" value=${end} min=${start} onInput=${e=>setEnd(e.target.value)} style=${{...inp,marginTop:4}}/></label>
+        </div>
+        <div style=${{fontSize:11,color:'#7A7068',fontWeight:600,marginBottom:7}}>Color</div>
+        <div style=${{display:'flex',gap:7,flexWrap:'wrap',marginBottom:18}}>
+          ${CAL_EVENT_COLORS.map(c=>html`<div key=${c} onClick=${()=>setColor(c)} title=${c===FYI_COLOR?'FYI / gray':'Event color'}
+            style=${{width:26,height:26,borderRadius:'50%',background:c,cursor:'pointer',flexShrink:0,position:'relative',border:color===c?'2.5px solid #2A2825':'1.5px solid rgba(0,0,0,0.12)'}}>
+            ${c===FYI_COLOR&&html`<span style=${{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:7.5,color:'#6A625A',fontWeight:700}}>FYI</span>`}</div>`)}
+        </div>
+        <div style=${{display:'flex',gap:10,justifyContent:'flex-end'}}>
+          <button onClick=${onClose} style=${{background:'#F0EBE5',color:'#2A2825',border:'none',borderRadius:8,padding:'8px 16px',fontSize:13,cursor:'pointer',fontWeight:500}}>Cancel</button>
+          <button onClick=${submit} style=${{background:'#2A2825',color:'white',border:'none',borderRadius:8,padding:'8px 16px',fontSize:13,cursor:'pointer',fontWeight:500}}>Add event</button>
+        </div>
+      </div>
+    </div>`;
+};
+
+const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssignDay,weeks=1,onSetWeeks,calendarEvents=[],onAddCalendarEvent,onDeleteCalendarEvent}) => {
   const weekDates=getWeekDates(weeks);
   const today=new Date().getDay();
   const[pickerTask,setPickerTask]=useState(null);
   const[pickerPos,setPickerPos]=useState({top:0,left:0});
+  const[showEventForm,setShowEventForm]=useState(false);
+  // Standalone calendar events, sorted so a multi-day event keeps a stable row across days.
+  const sortedCalEvents=[...calendarEvents].sort((a,b)=>a.startDate<b.startDate?-1:a.startDate>b.startDate?1:(a.id<b.id?-1:1));
   const openTaskPicker=(e,t)=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setPickerPos({top:Math.min(r.bottom+4,window.innerHeight-400),left:Math.max(4,Math.min(r.left,window.innerWidth-300))});setPickerTask(t);};
 
   const allTasks=projects.flatMap(p=>
@@ -1367,9 +1424,11 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
   };
 
   const renderDayCell=(i,d)=>{
-    const isToday=toISO(d)===todayISO();
-    const{eventsNoTime,untimedTasks,timed}=itemsForDay(toISO(d));
-    const hasAny=eventsNoTime.length>0||untimedTasks.length>0||timed.length>0;
+    const iso=toISO(d);
+    const isToday=iso===todayISO();
+    const{eventsNoTime,untimedTasks,timed}=itemsForDay(iso);
+    const dayEvents=sortedCalEvents.filter(ev=>ev.startDate<=iso&&iso<=(ev.endDate||ev.startDate));
+    const hasAny=dayEvents.length>0||eventsNoTime.length>0||untimedTasks.length>0||timed.length>0;
     const col=i%7;
     return html`
       <div key=${i} style=${{borderRight:col<6?'1px solid #F0EBE5':'none',padding:'5px 5px',background:isToday?'#FAFAF8':'white',overflowY:'auto',minHeight:62,maxHeight:weeks>1?150:240}}>
@@ -1377,6 +1436,7 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
           <div style=${{fontSize:12,fontWeight:600,lineHeight:1,background:isToday?'#2A2825':'none',color:isToday?'white':'#9A9088',
             borderRadius:'50%',width:20,height:20,display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto'}}>${d.getDate()}</div>
         </div>
+        ${dayEvents.map(ev=>html`<${CalEventChip} key=${ev.id} ev=${ev} isStart=${ev.startDate===iso} onDelete=${onDeleteCalendarEvent}/>`)}
         ${eventsNoTime.map(e=>html`
           <div key=${e.id} style=${{background:e.important?PRIORITY_BG:'#F0EBE5',borderRadius:4,padding:'3px 5px',marginBottom:3,borderLeft:`2px solid ${e.projectColor}`,cursor:'pointer'}} onClick=${ev=>openTaskPicker(ev,e)}>
             <div style=${{fontSize:10,color:'#2A2825',lineHeight:1.3,wordBreak:'break-word'}}>${e.text}</div>
@@ -1412,6 +1472,7 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
     </div>`;
 
   return html`
+    <${Fragment}>
     <div style=${{background:'white',borderBottom:'1px solid #EAE4DC',flexShrink:0}}>
       <!-- Header row -->
       <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 20px 6px'}}>
@@ -1425,6 +1486,8 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
           <span style=${{fontFamily:"'DM Serif Display',serif",fontSize:14,color:'#2A2825'}}>${weeks===1?'This Week':fmtRange(weekDates)}</span>
         </div>
         <div style=${{display:'flex',alignItems:'center',gap:12}}>
+          ${onAddCalendarEvent&&html`<button onClick=${()=>setShowEventForm(true)} title="Add a calendar event (can span multiple days)"
+            style=${{display:'flex',alignItems:'center',gap:3,background:'#2A2825',color:'#F4F1ED',border:'none',borderRadius:14,padding:'4px 11px',fontSize:11,fontWeight:500,cursor:'pointer'}}>+ Event</button>`}
           <div style=${{display:'flex',alignItems:'center',gap:6}}>
             <span style=${{fontSize:9.5,letterSpacing:'0.5px',textTransform:'uppercase',color:'#B0A898',fontWeight:600}}>Weeks</span>
             <div style=${{display:'flex',border:'1px solid #E0D8D0',borderRadius:6,overflow:'hidden'}}>
@@ -1453,7 +1516,9 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
             ${Array.from({length:7}).map((_,col)=>renderDayCell(w*7+col,weekDates[w*7+col]))}
           </div>`)}
       </div>
-    </div>`;
+    </div>
+    ${showEventForm&&onAddCalendarEvent&&html`<${CalEventForm} onAdd=${onAddCalendarEvent} onClose=${()=>setShowEventForm(false)}/>`}
+    <//>`;
 };
 
 /* ── Print ─────────────────────────────────────────────────── */
@@ -2075,8 +2140,11 @@ const App = () => {
   if(syncEnabled&&!session)return html`<${AuthGate}/>`;
   if(!loaded||!state)return Loading('Loading…');
 
-  const{projects,priorityIds=[],completedExpanded=false,weeksToShow=1}=state;
+  const{projects,priorityIds=[],completedExpanded=false,weeksToShow=1,calendarEvents=[]}=state;
   const upState=p=>setState(s=>({...s,...p}));
+  // Standalone calendar events (not tied to a project); part of synced state.
+  const addCalendarEvent=ev=>upState({calendarEvents:[...calendarEvents,{id:uid(),...ev}]});
+  const deleteCalendarEvent=id=>upState({calendarEvents:calendarEvents.filter(e=>e.id!==id)});
   const setWeeks=n=>upState({weeksToShow:n});
   const upProjects=p=>upState({projects:p});
   const upProject=u=>upProjects(projects.map(p=>p.id===u.id?u:p));
@@ -2195,6 +2263,7 @@ const App = () => {
           maxByWindow=${()=>window.innerWidth-(brainyCollapsed?30:brainWidth)-320}/>`}
         <div style=${{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
           <${WeekCalendar} projects=${projects} priorityIds=${priorityIds} weeks=${weeksToShow} onSetWeeks=${setWeeks}
+            calendarEvents=${calendarEvents} onAddCalendarEvent=${addCalendarEvent} onDeleteCalendarEvent=${deleteCalendarEvent}
             calCollapsed=${calCollapsed} onToggleCalendar=${()=>setCalCollapsed(p=>!p)}
             onAssignDay=${(tid,day,time,end,kind)=>{
               if(kind==='event'){
