@@ -278,18 +278,29 @@ const ProjectColorPicker = ({current,onSelect,onClose}) => {
     </div>`;
 };
 
-/* ── 3-dot Menu ────────────────────────────────────────────── */
-const ThreeDotMenu = ({onDelete}) => {
+/* ── 3-dot Menu (project header) ───────────────────────────── */
+const ThreeDotMenu = ({onDelete,onCopyCopilot}) => {
   const[open,setOpen]=useState(false);
+  const[copyState,setCopyState]=useState(''); // '' | 'done' | 'err'
   const ref=useRef(null);
   useEffect(()=>{
     const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
     document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h);
   },[]);
+  // Copy stays in the open menu just long enough to show its ✓ / failure.
+  const doCopy=async()=>{
+    const ok=await onCopyCopilot();
+    setCopyState(ok?'done':'err');
+    setTimeout(()=>{setOpen(false);setCopyState('');},900);
+  };
   return html`
     <div ref=${ref} style=${{position:'relative',flexShrink:0}} onClick=${e=>e.stopPropagation()}>
       <button onClick=${()=>setOpen(p=>!p)} style=${{background:open?'rgba(0,0,0,0.1)':'none',border:'none',cursor:'pointer',color:'rgba(0,0,0,0.4)',fontSize:17,lineHeight:1,padding:'2px 7px',borderRadius:6}}>⋯</button>
-      ${open&&html`<div style=${{position:'absolute',right:0,top:'calc(100% + 4px)',background:'white',borderRadius:10,boxShadow:'0 8px 28px rgba(0,0,0,0.14)',border:'1px solid rgba(0,0,0,0.06)',minWidth:150,zIndex:900}}>
+      ${open&&html`<div style=${{position:'absolute',right:0,top:'calc(100% + 4px)',background:'white',borderRadius:10,boxShadow:'0 8px 28px rgba(0,0,0,0.14)',border:'1px solid rgba(0,0,0,0.06)',minWidth:170,zIndex:900}}>
+        ${onCopyCopilot&&html`<button onClick=${doCopy}
+          title="Copy this plan's open tasks — paste into a Microsoft Copilot chat"
+          style=${{width:'100%',padding:'11px 16px',background:'none',border:'none',cursor:'pointer',textAlign:'left',fontSize:13,color:copyState==='err'?'#A0291E':copyState==='done'?'#5E7A5E':'#2A2825',borderRadius:10,borderBottom:'1px solid #F0EBE5',whiteSpace:'nowrap'}}>
+          ${copyState==='done'?'✓ Copied — paste into Copilot':copyState==='err'?'Copy failed':'⧉ Copy for Copilot'}</button>`}
         <button onClick=${()=>{setOpen(false);onDelete();}} style=${{width:'100%',padding:'11px 16px',background:'none',border:'none',cursor:'pointer',textAlign:'left',fontSize:13,color:'#A0291E',borderRadius:10}}>Delete project</button>
       </div>`}
     </div>`;
@@ -767,7 +778,7 @@ const EventRow = ({event,onToggleDone,onDelete,onEdit,onOpenPicker,onToggleImpor
     </div>`;
 };
 
-const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds,onTogglePriority,masterCollapsed,openColorPickerId,setOpenColorPickerId,weeks=1,onMoveNote}) => {
+const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds,onTogglePriority,masterCollapsed,openColorPickerId,setOpenColorPickerId,weeks=1,onMoveNote,onCopyCopilot}) => {
   const[newTask,setNewTask]=useState('');
   const[newReminder,setNewReminder]=useState('');
   const[newEvent,setNewEvent]=useState('');
@@ -867,7 +878,7 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
             <svg width="11" height="9" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Complete ${pendingComplete.length}
           </button>`}
-          <div onClick=${e=>e.stopPropagation()}><${ThreeDotMenu} onDelete=${()=>setConfirm(true)}/></div>
+          <div onClick=${e=>e.stopPropagation()}><${ThreeDotMenu} onDelete=${()=>setConfirm(true)} onCopyCopilot=${onCopyCopilot}/></div>
           <span style=${{fontSize:11,color:subColor,transform:isExpanded?'rotate(180deg)':'none',transition:'transform 0.2s',display:'inline-block',flexShrink:0,marginLeft:2}}>▾</span>
         </div>
         ${isExpanded&&html`<div style=${{display:'flex',borderRadius:'0 0 14px 14px',overflow:'visible'}}>
@@ -1697,31 +1708,24 @@ const buildPrintHTML = (projects,priorityIds,completedExpanded) => {
 };
 
 /* ── Copy for Copilot ──────────────────────────────────────────
-   Every OPEN item (tasks/reminders/events per project, plus standalone
-   calendar events) as Markdown for pasting into a Microsoft Copilot
-   chat — the zero-auth bridge to "have Copilot act on my tasks".
-   Each item appears exactly once so Copilot can't double-import it. */
-const buildCopilotText=state=>{
+   Open TASKS only (no reminders/events — user preference) from the given
+   plans (projectIds; null = all), as Markdown for pasting into a
+   Microsoft Copilot chat. Each task appears exactly once so Copilot
+   can't double-import it. */
+const buildCopilotText=(state,projectIds=null)=>{
   const tdy=todayISO();
   const due=d=>!d?'':d===tdy?` (due today, ${isoToLong(d)})`:d<tdy?` (OVERDUE — was due ${isoToLong(d)})`:` (due ${isoToLong(d)})`;
-  const onDate=d=>!d?'':d===tdy?` (today, ${isoToLong(d)})`:` (on ${isoToLong(d)})`;
   const pri=new Set(state.priorityIds||[]);
-  const lines=[`Here are my open planner items as of ${isoToLong(tdy)}, grouped by project. ★ = priority task, ⚑ = flagged reminder, OVERDUE = past its due date.`];
+  const wanted=projectIds&&projectIds.length?new Set(projectIds):null;
+  const lines=[`Here are my open tasks as of ${isoToLong(tdy)}, grouped by project. ★ = priority, OVERDUE = past its due date.`];
   (state.projects||[]).forEach(p=>{
-    const open=k=>(p[k]||[]).filter(it=>!it.done);
-    const t=open('tasks').sort((a,b)=>pri.has(b.id)-pri.has(a.id)),r=open('reminders'),e=open('events');
-    if(!t.length&&!r.length&&!e.length)return;
+    if(wanted&&!wanted.has(p.id))return;
+    const t=(p.tasks||[]).filter(it=>!it.done).sort((a,b)=>pri.has(b.id)-pri.has(a.id));
+    if(!t.length)return;
     lines.push('','## '+p.name);
-    t.forEach(x=>lines.push(`- [task] ${pri.has(x.id)?'★ ':''}${x.text}${due(x.dueDate)}`));
-    r.forEach(x=>lines.push(`- [reminder] ${x.flagged?'⚑ ':''}${x.text}${due(x.dueDate)}`));
-    e.forEach(x=>lines.push(`- [event] ${x.text}${x.endDate&&x.dueDate?` (${isoToLong(x.dueDate)} to ${isoToLong(x.endDate)})`:onDate(x.dueDate)}${x.taskTime?` at ${fmtTime(x.taskTime)}`:''}`));
+    t.forEach(x=>lines.push(`- ${pri.has(x.id)?'★ ':''}${x.text}${due(x.dueDate)}`));
   });
-  const cal=(state.calendarEvents||[]).filter(ev=>(ev.endDate||ev.startDate)>=tdy)
-    .sort((a,b)=>(a.startDate||'').localeCompare(b.startDate||''));
-  if(cal.length){
-    lines.push('','## Calendar');
-    cal.forEach(ev=>lines.push(`- ${ev.text} (${isoToLong(ev.startDate)}${ev.endDate&&ev.endDate!==ev.startDate?` to ${isoToLong(ev.endDate)}`:''})`));
-  }
+  if(lines.length===1)lines.push('','(No open tasks.)');
   return lines.join('\n');
 };
 
@@ -2220,19 +2224,40 @@ const AddPasskeyButton = () => {
     ${st==='busy'?'Adding…':st==='err'?'Retry passkey':'＋ Add passkey'}</button>`;
 };
 
-/* One-click "Copy for Copilot": puts the open-items digest on the
-   clipboard to paste into a Microsoft Copilot chat. Transient ✓/✗
-   feedback on the button itself, like AddPasskeyButton. */
-const CopilotCopyButton=({getText})=>{
+/* "Copy for Copilot" plan picker (from the header ⋯ menu): choose which
+   plans' open tasks go to the clipboard. Single-plan copy also lives in
+   each plan's own ⋯ menu. */
+const CopilotCopyModal=({projects,onCopy,onClose})=>{
+  const[sel,setSel]=useState(()=>new Set(projects.map(p=>p.id))); // default: all
   const[st,setSt]=useState(''); // '' | 'done' | 'err'
-  const click=async()=>{
-    const ok=await copyTextToClipboard(getText());
-    setSt(ok?'done':'err');setTimeout(()=>setSt(''),2400);
+  const toggle=id=>setSel(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
+  const allOn=sel.size===projects.length;
+  const doCopy=async()=>{
+    if(!sel.size||st==='done')return;
+    const ok=await onCopy([...sel]);
+    setSt(ok?'done':'err');
+    if(ok)setTimeout(onClose,900);
   };
-  return html`<button onClick=${click}
-    title="Copy all open tasks, reminders, and events as text — paste into Microsoft Copilot and ask it to plan, triage, or add them to To Do"
-    style=${{background:'none',border:'1px solid '+(st==='done'?'#BBD0BB':'#E0D8D0'),borderRadius:16,padding:'6px 12px',fontSize:12,color:st==='done'?'#5E7A5E':st==='err'?'#A0291E':'#7A7068',cursor:'pointer',whiteSpace:'nowrap'}}>
-    ${st==='done'?'✓ Copied — paste into Copilot':st==='err'?'Copy failed':'⧉ Copy for Copilot'}</button>`;
+  return html`
+    <div style=${{position:'fixed',inset:0,zIndex:3000,background:'rgba(42,40,37,0.45)',display:'flex',alignItems:'center',justifyContent:'center'}} onClick=${onClose}>
+      <div onClick=${e=>e.stopPropagation()} style=${{background:'white',borderRadius:14,padding:'20px 22px',width:'min(340px,92vw)',maxHeight:'80vh',overflowY:'auto',boxShadow:'0 16px 48px rgba(0,0,0,0.2)'}}>
+        <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:18,marginBottom:4}}>Copy for Copilot</div>
+        <div style=${{fontSize:12,color:'#7A7068',marginBottom:12,lineHeight:1.45}}>Open tasks from the checked plans go to the clipboard — paste them into a Microsoft Copilot chat.</div>
+        <button onClick=${()=>setSel(allOn?new Set():new Set(projects.map(p=>p.id)))}
+          style=${{background:'none',border:'none',color:'#9A9088',fontSize:11,cursor:'pointer',padding:'0 0 8px',textDecoration:'underline',textUnderlineOffset:2}}>${allOn?'Select none':'Select all'}</button>
+        ${projects.map(p=>html`<label key=${p.id} style=${{display:'flex',alignItems:'center',gap:9,padding:'6px 2px',cursor:'pointer',userSelect:'none'}}>
+          <input type="checkbox" checked=${sel.has(p.id)} onChange=${()=>toggle(p.id)} style=${{width:15,height:15,accentColor:'#2A2825',cursor:'pointer',flexShrink:0}}/>
+          <span style=${{width:10,height:10,borderRadius:'50%',background:p.color,border:'1px solid rgba(0,0,0,0.12)',flexShrink:0}}/>
+          <span style=${{fontSize:13,color:'#2A2825',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${p.name}</span>
+        </label>`)}
+        <div style=${{display:'flex',gap:10,justifyContent:'flex-end',marginTop:16}}>
+          <button onClick=${onClose} style=${{background:'#F0EBE5',color:'#2A2825',border:'none',borderRadius:8,padding:'8px 16px',fontSize:13,cursor:'pointer',fontWeight:500}}>Cancel</button>
+          <button onClick=${doCopy} disabled=${!sel.size}
+            style=${{background:st==='done'?'#5E7A5E':sel.size?'#2A2825':'#D8D0C8',color:'white',border:'none',borderRadius:8,padding:'8px 16px',fontSize:13,cursor:sel.size?'pointer':'default',fontWeight:500,whiteSpace:'nowrap'}}>
+            ${st==='done'?'✓ Copied':st==='err'?'Copy failed — retry':`Copy ${sel.size||''} plan${sel.size===1?'':'s'}`}</button>
+        </div>
+      </div>
+    </div>`;
 };
 
 /* Draggable divider that resizes an adjacent side panel. dir=+1 grows the
@@ -2275,6 +2300,7 @@ const App = () => {
   const[addingProject,setAddingProject]=useState(false);
   const[newProjectName,setNewProjectName]=useState('');
   const[openColorPickerId,setOpenColorPickerId]=useState(null);
+  const[copilotPicker,setCopilotPicker]=useState(false);
   const[calCollapsed,setCalCollapsed]=useState(false);
   const[brainyCollapsed,setBrainyCollapsed]=useState(false);
   const[masterWidth,setMasterWidth]=useState(()=>loadPrefs().masterWidth||260);
@@ -2520,8 +2546,8 @@ const App = () => {
             <svg width="11" height="9" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Complete all (${pendingAllCount})
           </button>`}
-          <${CopilotCopyButton} getText=${()=>buildCopilotText(state)}/>
           <${OverflowMenu} items=${[
+            {label:'⧉ Copy for Copilot…',onClick:()=>setCopilotPicker(true)},
             {label:'Print',onClick:()=>{const h=buildPrintHTML(projects,priorityIds,completedExpanded);const w=window.open('','_blank');w.document.write(h);w.document.close();}},
             {label:'Export',onClick:()=>exportBackup(state)},
             {label:'Import',onClick:()=>fileRef.current?.click()},
@@ -2583,7 +2609,7 @@ const App = () => {
           </div>`}
           ${projects.length===0&&!addingProject&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#B0A898',fontSize:13}}><div style=${{fontSize:26,marginBottom:12,opacity:0.4}}>▤</div>No projects yet — add one above.</div>`}
           <${DraggableProjects} projects=${projects} onReorder=${upProjects}
-            renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow} onMoveNote=${moveNote}/>`}/>
+            renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow} onMoveNote=${moveNote} onCopyCopilot=${()=>copyTextToClipboard(buildCopilotText(state,[p.id]))}/>`}/>
           </div>
         </div>
         ${!brainyCollapsed&&html`<${PanelResizer} width=${brainWidth} setWidth=${setBrainWidth} dir=${-1} min=${240} max=${600} zoom=${zoom}
@@ -2593,6 +2619,9 @@ const App = () => {
           onReorder=${setInsights} width=${brainWidth}
           collapsed=${brainyCollapsed} onToggleCollapse=${()=>setBrainyCollapsed(p=>!p)}/>
       </div>
+      ${copilotPicker&&html`<${CopilotCopyModal} projects=${projects}
+        onCopy=${ids=>copyTextToClipboard(buildCopilotText(state,ids))}
+        onClose=${()=>setCopilotPicker(false)}/>`}
     </div>`;
 };
 
