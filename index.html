@@ -172,6 +172,19 @@ const saveState=s=>{
   saveLocal(s,ts);
   if(syncEnabled&&_syncUserId)pushRemote(_syncUserId,s,ts).catch(()=>{});
 };
+// Clipboard with a textarea/execCommand fallback for browsers that gate
+// navigator.clipboard (older iPad Safari). Resolves true when the copy stuck.
+const copyTextToClipboard=async text=>{
+  try{await navigator.clipboard.writeText(text);return true;}
+  catch(e){
+    try{
+      const ta=document.createElement('textarea');
+      ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
+      document.body.appendChild(ta);ta.select();
+      const ok=document.execCommand('copy');ta.remove();return ok;
+    }catch(e2){return false;}
+  }
+};
 const exportBackup = s => {
   const b=new Blob([JSON.stringify(s,null,2)],{type:'application/json'});
   const u=URL.createObjectURL(b),a=document.createElement('a');
@@ -1593,6 +1606,35 @@ const buildPrintHTML = (projects,priorityIds,completedExpanded) => {
   return`<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Planner</title><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Serif+Display&family=Caveat:wght@400&display=swap" rel="stylesheet"/><style>${css}</style></head><body><div class="hdr"><div><h1>Planner</h1><div class="date">${new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div></div><button class="exit-btn" onclick="window.close()">← Exit print view</button></div><button class="print-btn" onclick="window.print()">Print / Save as PDF</button>${masterSection}${projSections}</body></html>`;
 };
 
+/* ── Copy for Copilot ──────────────────────────────────────────
+   Every OPEN item (tasks/reminders/events per project, plus standalone
+   calendar events) as Markdown for pasting into a Microsoft Copilot
+   chat — the zero-auth bridge to "have Copilot act on my tasks".
+   Each item appears exactly once so Copilot can't double-import it. */
+const buildCopilotText=state=>{
+  const tdy=todayISO();
+  const due=d=>!d?'':d===tdy?` (due today, ${isoToLong(d)})`:d<tdy?` (OVERDUE — was due ${isoToLong(d)})`:` (due ${isoToLong(d)})`;
+  const onDate=d=>!d?'':d===tdy?` (today, ${isoToLong(d)})`:` (on ${isoToLong(d)})`;
+  const pri=new Set(state.priorityIds||[]);
+  const lines=[`Here are my open planner items as of ${isoToLong(tdy)}, grouped by project. ★ = priority task, ⚑ = flagged reminder, OVERDUE = past its due date.`];
+  (state.projects||[]).forEach(p=>{
+    const open=k=>(p[k]||[]).filter(it=>!it.done);
+    const t=open('tasks').sort((a,b)=>pri.has(b.id)-pri.has(a.id)),r=open('reminders'),e=open('events');
+    if(!t.length&&!r.length&&!e.length)return;
+    lines.push('','## '+p.name);
+    t.forEach(x=>lines.push(`- [task] ${pri.has(x.id)?'★ ':''}${x.text}${due(x.dueDate)}`));
+    r.forEach(x=>lines.push(`- [reminder] ${x.flagged?'⚑ ':''}${x.text}${due(x.dueDate)}`));
+    e.forEach(x=>lines.push(`- [event] ${x.text}${onDate(x.dueDate)}${x.taskTime?` at ${x.taskTime}`:''}`));
+  });
+  const cal=(state.calendarEvents||[]).filter(ev=>(ev.endDate||ev.startDate)>=tdy)
+    .sort((a,b)=>(a.startDate||'').localeCompare(b.startDate||''));
+  if(cal.length){
+    lines.push('','## Calendar');
+    cal.forEach(ev=>lines.push(`- ${ev.text} (${isoToLong(ev.startDate)}${ev.endDate&&ev.endDate!==ev.startDate?` to ${isoToLong(ev.endDate)}`:''})`));
+  }
+  return lines.join('\n');
+};
+
 /* ── Brainy Insights ───────────────────────────────────────────
    The Brain sidebar starts empty; insight cards appear when the user
    captures a voice/text note (→ /api/brainy). Insight shape:
@@ -2076,6 +2118,21 @@ const AddPasskeyButton = () => {
     ${st==='busy'?'Adding…':st==='err'?'Retry passkey':'＋ Add passkey'}</button>`;
 };
 
+/* One-click "Copy for Copilot": puts the open-items digest on the
+   clipboard to paste into a Microsoft Copilot chat. Transient ✓/✗
+   feedback on the button itself, like AddPasskeyButton. */
+const CopilotCopyButton=({getText})=>{
+  const[st,setSt]=useState(''); // '' | 'done' | 'err'
+  const click=async()=>{
+    const ok=await copyTextToClipboard(getText());
+    setSt(ok?'done':'err');setTimeout(()=>setSt(''),2400);
+  };
+  return html`<button onClick=${click}
+    title="Copy all open tasks, reminders, and events as text — paste into Microsoft Copilot and ask it to plan, triage, or add them to To Do"
+    style=${{background:'none',border:'1px solid '+(st==='done'?'#BBD0BB':'#E0D8D0'),borderRadius:16,padding:'6px 12px',fontSize:12,color:st==='done'?'#5E7A5E':st==='err'?'#A0291E':'#7A7068',cursor:'pointer',whiteSpace:'nowrap'}}>
+    ${st==='done'?'✓ Copied — paste into Copilot':st==='err'?'Copy failed':'⧉ Copy for Copilot'}</button>`;
+};
+
 /* Draggable divider that resizes an adjacent side panel. dir=+1 grows the
    panel when dragged right (left/Master panel), dir=-1 grows it when dragged
    left (right/Brain panel). maxByWindow keeps the center from being squeezed. */
@@ -2343,6 +2400,7 @@ const App = () => {
             <svg width="11" height="9" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Complete all (${pendingAllCount})
           </button>`}
+          <${CopilotCopyButton} getText=${()=>buildCopilotText(state)}/>
           <${OverflowMenu} items=${[
             {label:'Print',onClick:()=>{const h=buildPrintHTML(projects,priorityIds,completedExpanded);const w=window.open('','_blank');w.document.write(h);w.document.close();}},
             {label:'Export',onClick:()=>exportBackup(state)},
