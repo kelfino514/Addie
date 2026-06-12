@@ -38,6 +38,10 @@ const debounce = (fn,ms) => { let t; return (...a) => { clearTimeout(t); t=setTi
 // Lowercased word tokens, for fuzzy matching insight text to a project.
 const STOPWORDS=new Set(['the','and','for','with','from','this','that','your','about','into','need','make','sure','will','have','has','out','off','get','got','set','use','via','per','due','any','all','new','one','two','was','are','not','but','can','our','their','them','then','than','also','before','after','next','some']);
 const tokenize=s=>(s||'').toLowerCase().match(/[a-z0-9]+/g)||[];
+/* HTML-escape for the few places we build markup as strings (print view).
+   Task/note text can arrive from AI extraction of pasted recaps, so treat it
+   as untrusted — the print window shares this origin's storage. */
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 /* ── Color helpers ─────────────────────────────────────────── */
 function hexToHsl(hex){
@@ -164,13 +168,30 @@ const subscribeRemote=async(userId,onRemote)=>{
 // can never freeze sign-in boot on "Loading…".
 const withTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),ms))]);
 
+/* The AI functions (/api/brainy, /api/transcribe) only serve signed-in users
+   so strangers can't spend the API keys. Attach the Supabase session token;
+   local-only mode sends nothing (locally /api/* 404s and the on-device
+   fallback takes over anyway). */
+const authHeader=async()=>{
+  if(!syncEnabled)return{};
+  try{
+    const s=await getSupa();
+    const{data:{session}}=await s.auth.getSession();
+    return session?{Authorization:`Bearer ${session.access_token}`}:{};
+  }catch(e){return{};}
+};
+
 /* The persistence seam the app calls. Always writes the local cache, and
    (when signed in) pushes the same blob to Supabase with a matching
    timestamp. Both are debounced together by the caller. */
-const saveState=s=>{
+const saveState=(s,onResult)=>{
   const ts=new Date().toISOString();
   saveLocal(s,ts);
-  if(syncEnabled&&_syncUserId)pushRemote(_syncUserId,s,ts).catch(()=>{});
+  // Report whether the push actually landed so the UI can stop showing a
+  // green "synced" dot while edits silently pile up on one device.
+  if(syncEnabled&&_syncUserId)pushRemote(_syncUserId,s,ts)
+    .then(r=>onResult&&onResult(!r.error))
+    .catch(()=>onResult&&onResult(false));
 };
 // Clipboard with a textarea/execCommand fallback for browsers that gate
 // navigator.clipboard (older iPad Safari). Resolves true when the copy stuck.
@@ -200,6 +221,30 @@ const importBackup = (file,cb) => {
    to create their first project. (Earlier builds seeded demo sales data;
    recover it from git history if a demo seed is ever needed again.) */
 const makeSeed = () => ({ projects:[], priorityIds:[], completedExpanded:false });
+
+/* Every blob entering the app (local cache, server row, imported backup)
+   passes through here. A malformed blob must degrade to a usable shape —
+   never crash the render, and never get pushed back up to Supabase where it
+   would brick every other device. Unknown extra fields pass through. */
+const normalizeState = raw => {
+  const s = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  const arr = x => Array.isArray(x) ? x : [];
+  return {
+    ...s,
+    projects: arr(s.projects).filter(p => p && typeof p === 'object').map(p => ({
+      ...p,
+      id: String(p.id || uid()),
+      name: typeof p.name === 'string' ? p.name : 'Untitled',
+      color: typeof p.color === 'string' ? p.color : '#C8B8A2',
+      tasks: arr(p.tasks), reminders: arr(p.reminders),
+      events: arr(p.events), notes: arr(p.notes),
+    })),
+    priorityIds: arr(s.priorityIds),
+    collapsedIds: arr(s.collapsedIds),
+    calendarEvents: arr(s.calendarEvents),
+    completedExpanded: !!s.completedExpanded,
+  };
+};
 
 // Which projects render expanded for a given state blob. The collapsed list
 // (state.collapsedIds) is part of the synced state, so a collapsed project
@@ -1701,9 +1746,9 @@ const buildPrintHTML = (projects,priorityIds,completedExpanded) => {
   const normalGroups=projects.map(p=>({...p,masterTasks:p.tasks.filter(t=>!t.done&&!priorityIds.includes(t.id))})).filter(p=>p.masterTasks.length>0);
   const completedItems=completedExpanded?[...allTasks.filter(t=>t.done),...allReminders.filter(r=>r.done&&r.flagged)]:[];
   const css=`*{box-sizing:border-box;margin:0;padding:0}body{font-family:'DM Sans',sans-serif;color:#2A2825;padding:32pt;background:white}.hdr{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:24pt;border-bottom:1pt solid #E0D8D0;padding-bottom:10pt}h1{font-family:'DM Serif Display',serif;font-size:22pt}.date{font-size:9pt;color:#9A9088}.exit-btn,.print-btn{background:none;border:none;font-family:inherit;cursor:pointer;text-decoration:underline;padding:0}.exit-btn{font-size:11pt;color:#9A9088}.print-btn{display:block;margin-bottom:20pt;font-size:12pt;color:#2A2825;font-weight:600}.project{page-break-inside:avoid;margin-bottom:24pt;border:1pt solid #E0D8D0;border-radius:8pt;overflow:hidden}.ph{padding:10pt 14pt;font-family:'DM Serif Display',serif;font-size:13pt}.sec{padding:5pt 14pt 2pt;font-size:8pt;letter-spacing:1pt;text-transform:uppercase;color:#B0A898;font-weight:600;border-top:1pt solid #F0EBE5}.task{display:flex;align-items:center;gap:8pt;padding:5pt 14pt;font-size:10pt;border-top:1pt solid #F7F3EF}.dot{width:6pt;height:6pt;border-radius:50%;flex-shrink:0}.cb{width:10pt;height:10pt;border-radius:2pt;border:1.5pt solid #C8C0B8;flex-shrink:0}.cb.done{background:#2A2825;border-color:#2A2825}.done-text{text-decoration:line-through;color:#B0A898}.notes{display:flex;flex-wrap:wrap;gap:8pt;padding:10pt 14pt}.note{border-radius:4pt;padding:8pt 10pt;font-family:'Georgia','Times New Roman',serif;font-size:12pt;color:#3A3530;line-height:1.5;max-width:180pt}@media print{.exit-btn,.print-btn{display:none!important}}`;
-  const dot=c=>`<div class="dot" style="background:${c}"></div>`;
-  const masterSection=`<div class="project" style="page-break-after:always"><div class="ph" style="background:#F0EBE5">Master List</div>${priTasks.length?`<div class="sec" style="color:#D4758A;border-top:none">★ Priority</div>${priTasks.map(t=>`<div class="task"><div class="cb"></div>${dot(t.projectColor)}<span>${t.text}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${t.projectName}</span></div>`).join('')}` : ''}${flaggedReminders.length?`<div class="sec" style="color:#5B8FBF">⚑ Reminders</div>${flaggedReminders.map(r=>`<div class="task"><div class="cb"></div>${dot(r.projectColor)}<span>${r.text}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${r.projectName}</span></div>`).join('')}`:''}${normalGroups.map(p=>`<div class="sec">${p.name}</div>${p.masterTasks.map(t=>`<div class="task"><div class="cb"></div><span>${t.text}</span></div>`).join('')}`).join('')}${completedItems.length?`<div class="sec">Completed</div>${completedItems.map(i=>`<div class="task"><div class="cb done"></div>${dot(i.projectColor)}<span class="done-text">${i.text}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${i.projectName}</span></div>`).join('')}`:''}</div>`;
-  const projSections=projects.map(p=>`<div class="project"><div class="ph" style="background:${p.color};color:${isLight(p.color)?'#2A2825':'#fff'}">${p.name}</div>${p.tasks.length?`<div class="sec">Tasks</div>${p.tasks.map(t=>`<div class="task"><div class="cb${t.done?' done':''}"></div><span class="${t.done?'done-text':''}">${t.text}</span></div>`).join('')}`:''}${(p.reminders||[]).length?`<div class="sec">Reminders</div>${(p.reminders||[]).map(r=>`<div class="task"><div class="cb${r.done?' done':''}"></div><span class="${r.done?'done-text':''}">${r.text}</span>${r.flagged?` <span style="color:#5B8FBF">⚑</span>`:''}</div>`).join('')}`:''}${p.notes.length?`<div class="sec">Notes</div><div class="notes">${p.notes.map(n=>`<div class="note" style="background:${n.color}">${n.title?`<div style="font-family:'DM Serif Display',serif;font-size:13pt;margin-bottom:4pt">${n.title}</div>`:''}<div>${(n.text||'').replace(/\n/g,'<br/>')}</div>${(n.checklistItems||[]).map(it=>`<div style="margin-top:3pt;${it.done?'text-decoration:line-through;color:#9A9088':''}">• ${it.text}</div>`).join('')}</div>`).join('')}</div>`:''}  </div>`).join('');
+  const dot=c=>`<div class="dot" style="background:${esc(c)}"></div>`;
+  const masterSection=`<div class="project" style="page-break-after:always"><div class="ph" style="background:#F0EBE5">Master List</div>${priTasks.length?`<div class="sec" style="color:#D4758A;border-top:none">★ Priority</div>${priTasks.map(t=>`<div class="task"><div class="cb"></div>${dot(t.projectColor)}<span>${esc(t.text)}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${esc(t.projectName)}</span></div>`).join('')}` : ''}${flaggedReminders.length?`<div class="sec" style="color:#5B8FBF">⚑ Reminders</div>${flaggedReminders.map(r=>`<div class="task"><div class="cb"></div>${dot(r.projectColor)}<span>${esc(r.text)}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${esc(r.projectName)}</span></div>`).join('')}`:''}${normalGroups.map(p=>`<div class="sec">${esc(p.name)}</div>${p.masterTasks.map(t=>`<div class="task"><div class="cb"></div><span>${esc(t.text)}</span></div>`).join('')}`).join('')}${completedItems.length?`<div class="sec">Completed</div>${completedItems.map(i=>`<div class="task"><div class="cb done"></div>${dot(i.projectColor)}<span class="done-text">${esc(i.text)}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${esc(i.projectName)}</span></div>`).join('')}`:''}</div>`;
+  const projSections=projects.map(p=>`<div class="project"><div class="ph" style="background:${esc(p.color)};color:${isLight(p.color)?'#2A2825':'#fff'}">${esc(p.name)}</div>${p.tasks.length?`<div class="sec">Tasks</div>${p.tasks.map(t=>`<div class="task"><div class="cb${t.done?' done':''}"></div><span class="${t.done?'done-text':''}">${esc(t.text)}</span></div>`).join('')}`:''}${(p.reminders||[]).length?`<div class="sec">Reminders</div>${(p.reminders||[]).map(r=>`<div class="task"><div class="cb${r.done?' done':''}"></div><span class="${r.done?'done-text':''}">${esc(r.text)}</span>${r.flagged?` <span style="color:#5B8FBF">⚑</span>`:''}</div>`).join('')}`:''}${p.notes.length?`<div class="sec">Notes</div><div class="notes">${p.notes.map(n=>`<div class="note" style="background:${esc(n.color)}">${n.title?`<div style="font-family:'DM Serif Display',serif;font-size:13pt;margin-bottom:4pt">${esc(n.title)}</div>`:''}<div>${esc(n.text||'').replace(/\n/g,'<br/>')}</div>${(n.checklistItems||[]).map(it=>`<div style="margin-top:3pt;${it.done?'text-decoration:line-through;color:#9A9088':''}">• ${esc(it.text)}</div>`).join('')}</div>`).join('')}</div>`:''}  </div>`).join('');
   return`<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Planner</title><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Serif+Display&family=Caveat:wght@400&display=swap" rel="stylesheet"/><style>${css}</style></head><body><div class="hdr"><div><h1>Planner</h1><div class="date">${new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div></div><button class="exit-btn" onclick="window.close()">← Exit print view</button></div><button class="print-btn" onclick="window.print()">Print / Save as PDF</button>${masterSection}${projSections}</body></html>`;
 };
 
@@ -1863,7 +1908,7 @@ async function decodeToMono(blob){
 const blobToB64=blob=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=rej;r.readAsDataURL(blob);});
 async function transcribeBlob(blob,name){
   const audio=await blobToB64(blob);
-  const res=await fetch('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio,mime:blob.type,name})});
+  const res=await fetch('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/json',...(await authHeader())},body:JSON.stringify({audio,mime:blob.type,name})});
   if(!res.ok){let msg='Transcription failed ('+res.status+').';try{const d=await res.json();if(d&&d.error)msg=d.error;}catch(_){}throw new Error(msg);}
   return (await res.json()).text||'';
 }
@@ -1956,7 +2001,8 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
     const raw=capture.trim(); if(!raw||busy)return;
     setNote(null);setBusy('Analyzing…');
     try{
-      const res=await fetch('/api/brainy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:raw})});
+      const res=await fetch('/api/brainy',{method:'POST',headers:{'Content-Type':'application/json',...(await authHeader())},body:JSON.stringify({text:raw})});
+      if(res.status===401)setNote('Brain AI needs a signed-in session — used the on-device extraction instead. Refresh the page and retry.');
       if(!res.ok)throw new Error('backend '+res.status);
       const data=await res.json();
       onCapture(resultToInsights(data));
@@ -2320,13 +2366,13 @@ const App = () => {
   // Seed the app from a state blob (local cache or server), honoring the
   // persisted collapsed list.
   const bootState=saved=>{
-    const s=saved?purgeOldCompleted(saved):makeSeed();
+    const s=saved?purgeOldCompleted(normalizeState(saved)):makeSeed();
     setState(s);setExpandedIds(expandedFromState(s));
     setLoaded(true);
   };
   // A change pushed by ANOTHER device. Adopt it without echoing a save back up.
   const adoptRemote=(data,ts)=>{
-    const s=purgeOldCompleted(data);
+    const s=purgeOldCompleted(normalizeState(data));
     saveLocal(s,ts||new Date().toISOString());
     skipSave.current=true;
     setState(s);
@@ -2360,7 +2406,7 @@ const App = () => {
         chosen=makeSeed();chosenTs=reachable?new Date().toISOString():null;
         if(reachable){try{await withTimeout(pushRemote(userId,chosen,chosenTs),8000);}catch(e){}}
       }
-      const s=purgeOldCompleted(chosen);
+      const s=purgeOldCompleted(normalizeState(chosen));
       saveLocal(s,chosenTs);
       skipSave.current=true; // we already pushed during boot — don't re-push on first render
       setState(s);
@@ -2414,7 +2460,7 @@ const App = () => {
   useEffect(()=>{
     if(!loaded||!state)return;
     if(skipSave.current){skipSave.current=false;return;}
-    debouncedSave(state);
+    debouncedSave(state,ok=>setSyncStatus(ok?'synced':'connecting'));
   },[state,loaded]);
 
   const Loading=t=>html`<div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',color:'#B0A898',fontSize:14}}>${t}</div>`;
@@ -2555,7 +2601,10 @@ const App = () => {
               ?{label:'🔑 Passkey on (this device)',onClick:()=>{}}
               :{label:'🔑 Set up a passkey',onClick:()=>{tryRegisterPasskey();}}]:[]),
           ]}/>
-          <input ref=${fileRef} type="file" accept=".json" style=${{display:'none'}} onChange=${e=>{const f=e.target.files?.[0];if(f)importBackup(f,s=>{setState(s);setExpandedIds(expandedFromState(s));});e.target.value='';}}/>
+          <input ref=${fileRef} type="file" accept=".json" style=${{display:'none'}} onChange=${e=>{const f=e.target.files?.[0];if(f)importBackup(f,raw=>{
+            if(!raw||!Array.isArray(raw.projects)){alert("That file doesn't look like a planner backup — nothing was imported.");return;}
+            const s=normalizeState(raw);setState(s);setExpandedIds(expandedFromState(s));
+          });e.target.value='';}}/>
           ${syncEnabled&&session&&html`<div style=${{display:'flex',alignItems:'center',gap:7,marginLeft:2}}>
             <span title=${syncStatus==='synced'?'Synced across devices':'Connecting…'} style=${{width:8,height:8,borderRadius:'50%',background:syncStatus==='synced'?'#5E9E5E':'#C9A227',flexShrink:0}}/>
             <${AddPasskeyButton}/>

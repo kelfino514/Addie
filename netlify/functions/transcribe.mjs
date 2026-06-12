@@ -3,8 +3,25 @@
 // Note: Netlify synchronous functions cap the request body at ~6 MB, so this is
 // for short clips. Larger files need a background function or direct-to-storage upload.
 
+// Only signed-in users may spend API credits — same check as brainy.mjs.
+// These two values are public by design (they ship in index.html).
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://qykyltsgxfechhfnxrbq.supabase.co';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF5a3lsdHNneGZlY2hoZm54cmJxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEyMTk0MDgsImV4cCI6MjA5Njc5NTQwOH0.7sI2e-oTjMaz2Ca8E4hUlfvUX5E8G_xceGgkp7neM80';
+
+async function requireUser(req) {
+  const auth = req.headers.get('authorization') || '';
+  if (!auth.startsWith('Bearer ')) return false;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: { apikey: SUPABASE_ANON_KEY, authorization: auth },
+    });
+    return r.ok;
+  } catch { return false; }
+}
+
 export default async (req) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+  if (!(await requireUser(req))) return Response.json({ error: 'Sign in to use the AI features.' }, { status: 401 });
 
   const key = process.env.OPENAI_API_KEY;
   if (!key) return Response.json({ error: 'Server is missing OPENAI_API_KEY.' }, { status: 500 });
