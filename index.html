@@ -262,9 +262,86 @@ const normalizeState = raw => {
     priorityIds: arr(s.priorityIds),
     collapsedIds: arr(s.collapsedIds),
     calendarEvents: arr(s.calendarEvents),
+    tombstones: arr(s.tombstones),
     completedExpanded: !!s.completedExpanded,
   };
 };
+
+/* ── Cross-device merge ────────────────────────────────────────
+   Two devices editing DIFFERENT projects must never clobber each other,
+   so sync conflicts resolve per project (and per calendar event), not
+   per blob. Rules:
+   - Each project / calendar event carries an updatedAt stamp (written by
+     stampChanged below on every user mutation that touches it).
+   - Same id on both sides → the newer updatedAt wins (ties go to the
+     newer blob — also the fallback for legacy unstamped data).
+   - An id on only one side survives (covers "created offline"), UNLESS
+     the other side holds a newer tombstone for it: deletions are recorded
+     in state.tombstones [{id,deletedAt}] so a deleted project can't be
+     resurrected by a device that hadn't synced yet. An edit newer than
+     the tombstone beats the delete. Tombstones expire after 60 days.
+   - Granularity is the WHOLE project: concurrent edits to the same
+     project keep only the newer side's version of it.
+   - Top-level fields with no per-entity identity (project order,
+     priorityIds, collapsedIds, weeksToShow, completedExpanded) take the
+     newer blob's value — the old whole-blob rule, but its blast radius
+     is now just those fields.
+   Stamps come from each device's clock (same-user devices; NTP-sane). */
+const TOMBSTONE_DAYS=60;
+const mergeStates=(a,aTs,b,bTs)=>{
+  const bNewer=String(bTs||'')>=String(aTs||'');
+  const newer=bNewer?b:a, older=bNewer?a:b;
+  const tomb=new Map();
+  [...(a.tombstones||[]),...(b.tombstones||[])].forEach(t=>{
+    const cur=tomb.get(t.id);
+    if(!cur||String(t.deletedAt||'')>String(cur.deletedAt||''))tomb.set(t.id,t);
+  });
+  const dead=e=>{const t=tomb.get(e.id);return !!t&&String(t.deletedAt||'')>String(e.updatedAt||'');};
+  const union=key=>{
+    const byId=new Map();
+    (older[key]||[]).forEach(e=>byId.set(e.id,e));
+    (newer[key]||[]).forEach(e=>{
+      const cur=byId.get(e.id);
+      if(!cur||String(e.updatedAt||'')>=String(cur.updatedAt||''))byId.set(e.id,e);
+    });
+    // Keep the newer blob's order; entities only the older side knows go last.
+    const out=[];
+    (newer[key]||[]).forEach(e=>{const m=byId.get(e.id);if(m&&!out.includes(m))out.push(m);});
+    (older[key]||[]).forEach(e=>{const m=byId.get(e.id);if(m&&!out.includes(m))out.push(m);});
+    return out.filter(e=>!dead(e));
+  };
+  const projects=union('projects');
+  const calendarEvents=union('calendarEvents');
+  const liveTasks=new Set(projects.flatMap(p=>(p.tasks||[]).map(t=>t.id)));
+  const liveProj=new Set(projects.map(p=>p.id));
+  const cutoff=new Date(Date.now()-TOMBSTONE_DAYS*864e5).toISOString();
+  return{
+    ...newer,
+    projects,calendarEvents,
+    priorityIds:(newer.priorityIds||[]).filter(id=>liveTasks.has(id)),
+    collapsedIds:(newer.collapsedIds||[]).filter(id=>liveProj.has(id)),
+    tombstones:[...tomb.values()].filter(t=>String(t.deletedAt||'')>cutoff),
+  };
+};
+
+/* Stamp updatedAt on every project / calendar event a mutation actually
+   touched. Detection is by reference: every mutator rebuilds exactly the
+   objects it changes (immutable updates), so an unchanged project keeps
+   its identity and its stamp. Server-originated state must NOT pass
+   through here — only user edits count as "this device touched it". */
+const stampChanged=(prev,next)=>{
+  if(!prev||prev===next)return next;
+  const now=new Date().toISOString();
+  const stampList=(po,no)=>{
+    if(po===no)return no;
+    const prevById=new Map((po||[]).map(e=>[e.id,e]));
+    return(no||[]).map(e=>prevById.get(e.id)===e?e:{...e,updatedAt:now});
+  };
+  return{...next,projects:stampList(prev.projects,next.projects),calendarEvents:stampList(prev.calendarEvents,next.calendarEvents)};
+};
+const tombstoneFor=id=>({id,deletedAt:new Date().toISOString()});
+// Dev hook: lets the local preview exercise the pure merge logic directly.
+if(isLocalhost)window.__addie={mergeStates,stampChanged,normalizeState};
 
 // Which projects render expanded for a given state blob. The collapsed list
 // (state.collapsedIds) is part of the synced state, so a collapsed project
@@ -2239,6 +2316,7 @@ const PanelResizer = ({width,setWidth,dir,min,max,maxByWindow,zoom=1}) => {
 
 const App = () => {
   const[state,setState]=useState(null);
+  const stateRef=useRef(null);stateRef.current=state; // adoptRemote registers once at boot — it reads the CURRENT state through this ref
   const[loaded,setLoaded]=useState(false);
   const[session,setSession]=useState(null);
   const[authReady,setAuthReady]=useState(!syncEnabled); // local-only: nothing to wait for
@@ -2272,13 +2350,20 @@ const App = () => {
     setState(s);setExpandedIds(expandedFromState(s));
     setLoaded(true);
   };
-  // A change pushed by ANOTHER device. Adopt it without echoing a save back up.
+  /* A change pushed by ANOTHER device. Merge it with what this device has
+     (per-project, see mergeStates) instead of adopting it wholesale — a
+     realtime push must not clobber edits made here that haven't synced yet.
+     If the merge ends up holding anything the server doesn't have, let the
+     normal persist effect push it back up; otherwise suppress the echo. */
   const adoptRemote=(data,ts)=>{
-    const s=purgeOldCompleted(normalizeState(data));
-    saveLocal(s,ts||new Date().toISOString());
-    skipSave.current=true;
-    setState(s);
-    setExpandedIds(prev=>{const n=new Set(prev);(s.projects||[]).forEach(p=>{if(!prev.has(p.id))n.add(p.id);});return n;});
+    const remote=purgeOldCompleted(normalizeState(data));
+    const prev=stateRef.current;
+    const merged=prev?mergeStates(purgeOldCompleted(normalizeState(prev)),loadLocalTs(),remote,ts):remote;
+    const sameAsRemote=!prev||JSON.stringify(merged)===JSON.stringify(remote);
+    saveLocal(merged,sameAsRemote?(ts||new Date().toISOString()):new Date().toISOString());
+    skipSave.current=sameAsRemote;
+    setState(merged);
+    setExpandedIds(prevIds=>{const n=new Set(prevIds);(merged.projects||[]).forEach(p=>{if(!prevIds.has(p.id))n.add(p.id);});return n;});
   };
   // First sign-in or returning: reconcile local cache vs server (newer wins),
   // migrate local up if the server has nothing yet. Hardened so it ALWAYS ends
@@ -2295,8 +2380,20 @@ const App = () => {
       try{row=await withTimeout(pullRemote(userId),8000);reachable=true;}catch(e){}
       const hasRemote=row&&row.data&&Object.keys(row.data).length;
       let chosen,chosenTs;
-      if(hasRemote&&local&&localTs&&row.updated_at&&new Date(localTs).getTime()>new Date(row.updated_at).getTime()){
-        chosen=local;chosenTs=localTs;try{await withTimeout(pushRemote(userId,local,localTs),8000);}catch(e){}
+      if(hasRemote&&local){
+        // Two histories (this device's cache + the server row): merge per
+        // project instead of newer-blob-wins, so edits made here while
+        // offline survive a boot even when another device wrote later.
+        // Push the result up only when it differs from the server's copy.
+        const localN=purgeOldCompleted(normalizeState(local));
+        const remoteN=purgeOldCompleted(normalizeState(row.data));
+        const merged=mergeStates(localN,localTs,remoteN,row.updated_at);
+        if(JSON.stringify(merged)!==JSON.stringify(remoteN)){
+          chosen=merged;chosenTs=new Date().toISOString();
+          try{await withTimeout(pushRemote(userId,merged,chosenTs),8000);}catch(e){}
+        }else{
+          chosen=remoteN;chosenTs=row.updated_at;
+        }
       }else if(hasRemote){
         chosen=row.data;chosenTs=row.updated_at;
       }else if(local){
@@ -2371,17 +2468,27 @@ const App = () => {
   if(!loaded||!state)return Loading('Loading…');
 
   const{projects,priorityIds=[],completedExpanded=false,weeksToShow=1,calendarEvents=[]}=state;
-  const upState=p=>setState(s=>({...s,...p}));
+  /* Every USER mutation funnels through updateState so stampChanged can
+     mark which projects/events this device touched (the merge needs those
+     stamps). State adopted FROM the server (bootState/bootSynced/
+     adoptRemote) calls setState directly and keeps the server's stamps. */
+  const updateState=up=>setState(s=>{
+    if(!s)return s;
+    const next=typeof up==='function'?up(s):{...s,...up};
+    return next===s?s:stampChanged(s,next);
+  });
+  const upState=p=>updateState(p);
   // Standalone calendar events (not tied to a project); part of synced state.
   const saveCalendarEvent=ev=>{
     if(ev.id&&calendarEvents.some(e=>e.id===ev.id))upState({calendarEvents:calendarEvents.map(e=>e.id===ev.id?ev:e)});
     else upState({calendarEvents:[...calendarEvents,{...ev,id:uid()}]});
   };
-  const deleteCalendarEvent=id=>upState({calendarEvents:calendarEvents.filter(e=>e.id!==id)});
+  // Deletions leave a tombstone so the merge can't resurrect them.
+  const deleteCalendarEvent=id=>updateState(s=>({...s,calendarEvents:(s.calendarEvents||[]).filter(e=>e.id!==id),tombstones:[...(s.tombstones||[]),tombstoneFor(id)]}));
   // Move a sticky note from one project to another (drag-and-drop between projects).
   const moveNote=(note,fromId,toId)=>{
     if(fromId===toId)return;
-    setState(s=>({...s,projects:s.projects.map(p=>{
+    updateState(s=>({...s,projects:s.projects.map(p=>{
       if(p.id===fromId)return{...p,notes:(p.notes||[]).filter(n=>n.id!==note.id)};
       if(p.id===toId)return{...p,notes:[...(p.notes||[]),note]};
       return p;
@@ -2392,15 +2499,15 @@ const App = () => {
   const upProject=u=>upProjects(projects.map(p=>p.id===u.id?u:p));
   /* Generic item CRUD — the single choke point every task/reminder/event
      mutation goes through (project rows, master list, calendar, pickers). */
-  const patchItem=(pid,kind,id,patch,resort=false)=>setState(s=>({...s,projects:s.projects.map(p=>{
+  const patchItem=(pid,kind,id,patch,resort=false)=>updateState(s=>({...s,projects:s.projects.map(p=>{
     if(p.id!==pid)return p;
     const key=KIND_KEY[kind];
     let list=(p[key]||[]).map(it=>it.id===id?{...it,...(typeof patch==='function'?patch(it):patch)}:it);
     if(resort)list=sortDoneLast(list);
     return{...p,[key]:list};
   })}));
-  const addItem=(pid,kind,item)=>setState(s=>({...s,projects:s.projects.map(p=>p.id===pid?{...p,[KIND_KEY[kind]]:[...(p[KIND_KEY[kind]]||[]),{id:uid(),done:false,...item}]}:p)}));
-  const removeItem=(pid,kind,id)=>setState(s=>({...s,projects:s.projects.map(p=>p.id===pid?{...p,[KIND_KEY[kind]]:(p[KIND_KEY[kind]]||[]).filter(i=>i.id!==id)}:p)}));
+  const addItem=(pid,kind,item)=>updateState(s=>({...s,projects:s.projects.map(p=>p.id===pid?{...p,[KIND_KEY[kind]]:[...(p[KIND_KEY[kind]]||[]),{id:uid(),done:false,...item}]}:p)}));
+  const removeItem=(pid,kind,id)=>updateState(s=>({...s,projects:s.projects.map(p=>p.id===pid?{...p,[KIND_KEY[kind]]:(p[KIND_KEY[kind]]||[]).filter(i=>i.id!==id)}:p)}));
   const findOwner=(kind,id)=>projects.find(p=>(p[KIND_KEY[kind]]||[]).some(i=>i.id===id));
   /* One schedule writer for every entry point. For events, an explicit
      endDate (including null) is honored; omitting it shifts an existing
@@ -2416,7 +2523,8 @@ const App = () => {
   // Master-list toggle also un-archives (the Completed section lives there).
   const masterToggle=(pid,kind,id)=>patchItem(pid,kind,id,it=>({...toggleDonePatch(it),archived:false}),true);
   const delProject=id=>{
-    setState(s=>({...s,projects:s.projects.filter(p=>p.id!==id),collapsedIds:(s.collapsedIds||[]).filter(x=>x!==id)}));
+    // Tombstone the id so another device's older copy can't resurrect it.
+    updateState(s=>({...s,projects:s.projects.filter(p=>p.id!==id),collapsedIds:(s.collapsedIds||[]).filter(x=>x!==id),tombstones:[...(s.tombstones||[]),tombstoneFor(id)]}));
     setExpandedIds(prev=>{const n=new Set(prev);n.delete(id);return n;});
   };
   const addProject=()=>{
@@ -2431,7 +2539,7 @@ const App = () => {
   const toggleExp=id=>{
     const wasExpanded=expandedIds.has(id);
     setExpandedIds(prev=>{const n=new Set(prev);wasExpanded?n.delete(id):n.add(id);return n;});
-    setState(s=>{
+    updateState(s=>{
       const rest=(s.collapsedIds||[]).filter(x=>x!==id);
       return{...s,collapsedIds:wasExpanded?[...rest,id]:rest};
     });
@@ -2440,11 +2548,11 @@ const App = () => {
   // the persisted collapsed list, so it doesn't re-collapse on refresh.
   const expandProject=id=>{
     setExpandedIds(prev=>prev.has(id)?prev:new Set([...prev,id]));
-    setState(s=>(s.collapsedIds||[]).includes(id)?{...s,collapsedIds:s.collapsedIds.filter(x=>x!==id)}:s);
+    updateState(s=>(s.collapsedIds||[]).includes(id)?{...s,collapsedIds:s.collapsedIds.filter(x=>x!==id)}:s);
   };
   const togglePriority=tid=>{const a=priorityIds.includes(tid);upState({priorityIds:a?priorityIds.filter(x=>x!==tid):[...priorityIds,tid]});};
   const reorderPriority=(fromId,toId)=>{const a=[...priorityIds];const fi=a.indexOf(fromId),ti=a.indexOf(toId);if(fi!==-1&&ti!==-1){[a[fi],a[ti]]=[a[ti],a[fi]];upState({priorityIds:a});}};
-  const emptyCompleted=()=>{setState(s=>{const projects=s.projects.map(p=>({...p,tasks:p.tasks.filter(t=>!t.archived),reminders:(p.reminders||[]).filter(r=>!r.archived),events:(p.events||[]).filter(e=>!e.archived)}));const liveIds=new Set(projects.flatMap(p=>p.tasks.map(t=>t.id)));return{...s,projects,priorityIds:s.priorityIds.filter(id=>liveIds.has(id))};});};
+  const emptyCompleted=()=>{updateState(s=>{const projects=s.projects.map(p=>({...p,tasks:p.tasks.filter(t=>!t.archived),reminders:(p.reminders||[]).filter(r=>!r.archived),events:(p.events||[]).filter(e=>!e.archived)}));const liveIds=new Set(projects.flatMap(p=>p.tasks.map(t=>t.id)));return{...s,projects,priorityIds:s.priorityIds.filter(id=>liveIds.has(id))};});};
   /* ── Brainy → Planner bridge ──────────────────────────────────
      This is the integration: a suggestion becomes a real planner
      item (tagged fromBrainy) and immediately flows everywhere the
@@ -2453,7 +2561,7 @@ const App = () => {
     const newId=uid();
     const {text:cleanText,due:textDue}=extractDue(insight.text); // honor a trailing @date
     const due=scheduledDate||textDue; // the card's explicit Schedule date wins
-    setState(s=>{
+    updateState(s=>{
       const projects=s.projects.map(p=>{
         if(p.id!==projectId)return p;
         if(kind==='note')return{...p,notes:[...p.notes,{id:newId,title:(insight.noteTitle||'').trim(),text:cleanText,color:important?'#FFF3BF':defaultNoteColor(p.color),gradientStep:null,checklistItems:[],collapsed:false,fromBrainy:true}]};
@@ -2470,7 +2578,7 @@ const App = () => {
     setInsights(prev=>prev.filter(i=>i.id!==insight.id));
   };
   const addInsightToExistingNote=(insight,projectId,noteId)=>{
-    setState(s=>({...s,projects:s.projects.map(p=>{
+    updateState(s=>({...s,projects:s.projects.map(p=>{
       if(p.id!==projectId)return p;
       return{...p,notes:p.notes.map(n=>{
         if(n.id!==noteId)return n;
@@ -2521,7 +2629,11 @@ const App = () => {
           ]}/>
           <input ref=${fileRef} type="file" accept=".json" style=${{display:'none'}} onChange=${e=>{const f=e.target.files?.[0];if(f)importBackup(f,raw=>{
             if(!raw||!Array.isArray(raw.projects)){alert("That file doesn't look like a planner backup — nothing was imported.");return;}
-            const s=normalizeState(raw);setState(s);setExpandedIds(expandedFromState(s));
+            // An import is an explicit restore: stamp everything fresh so it
+            // beats any tombstone or older copy in the next merge.
+            const n=normalizeState(raw),now=new Date().toISOString();
+            const s={...n,projects:n.projects.map(p=>({...p,updatedAt:now})),calendarEvents:n.calendarEvents.map(ev=>({...ev,updatedAt:now})),tombstones:[]};
+            setState(s);setExpandedIds(expandedFromState(s));
           });e.target.value='';}}/>
           ${syncEnabled&&session&&html`<div style=${{display:'flex',alignItems:'center',gap:7,marginLeft:2}}>
             <span title=${syncStatus==='synced'?'Synced across devices':'Connecting…'} style=${{width:8,height:8,borderRadius:'50%',background:syncStatus==='synced'?'#5E9E5E':'#C9A227',flexShrink:0}}/>
