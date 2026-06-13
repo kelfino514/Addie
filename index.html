@@ -2229,7 +2229,7 @@ const AuthGate = () => {
   return html`
     <div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',background:'#F4F1ED',padding:20}}>
       <div style=${{background:'white',borderRadius:16,padding:'30px 30px 26px',width:'min(380px,92vw)',boxShadow:'0 16px 48px rgba(0,0,0,0.12)'}}>
-        <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:24,marginBottom:6}}>Planner</div>
+        <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:24,marginBottom:6}}>Addie App Planner</div>
         ${view==='home'?html`
           <div style=${{fontSize:13,color:'#7A7068',marginBottom:22,lineHeight:1.5}}>Sign in to sync your planner across devices.</div>
           <button onClick=${doPasskey} disabled=${!!busy} style=${BTN(busy==='passkey')}>${busy==='passkey'?'Waiting for passkey…':'🔑  Sign in with a passkey'}</button>
@@ -2632,7 +2632,7 @@ const App = () => {
   return html`
     <div style=${{width:'100%',height:'100%',display:'flex',flexDirection:'column',background:'#F4F1ED'}}>
       <header style=${{padding:'12px 22px',display:'flex',alignItems:'center',justifyContent:'space-between',borderBottom:'1px solid #EAE4DC',background:'#F4F1ED',flexShrink:0,zIndex:30,gap:10}}>
-        <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:21,letterSpacing:'-0.3px',flexShrink:0}}>Planner</div>
+        <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:21,letterSpacing:'-0.3px',flexShrink:0}}>Addie App Planner</div>
         <div style=${{display:'flex',gap:6,flexWrap:'wrap',justifyContent:'flex-end',alignItems:'center'}}>
           <div style=${{display:'flex',alignItems:'center',border:'1px solid #E0D8D0',borderRadius:16,overflow:'hidden'}} title="Zoom — makes everything fit, or larger to read">
             <button onClick=${()=>stepZoom(-0.1)} title="Zoom out" style=${{background:'none',border:'none',color:'#7A7068',fontSize:15,lineHeight:1,cursor:'pointer',padding:'4px 9px'}}>−</button>
