@@ -10,7 +10,7 @@
 <title>Addie App</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Serif+Display:ital@0;1&family=Caveat:wght@400;600&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Serif+Display:ital@0;1&display=swap" rel="stylesheet"/>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html,body,#root{height:100%;overflow:hidden}
@@ -38,6 +38,30 @@ const debounce = (fn,ms) => { let t; return (...a) => { clearTimeout(t); t=setTi
 // Lowercased word tokens, for fuzzy matching insight text to a project.
 const STOPWORDS=new Set(['the','and','for','with','from','this','that','your','about','into','need','make','sure','will','have','has','out','off','get','got','set','use','via','per','due','any','all','new','one','two','was','are','not','but','can','our','their','them','then','than','also','before','after','next','some']);
 const tokenize=s=>(s||'').toLowerCase().match(/[a-z0-9]+/g)||[];
+/* HTML-escape for the few places we build markup as strings (print view).
+   Task/note text can arrive from AI extraction of pasted recaps, so treat it
+   as untrusted — the print window shares this origin's storage. */
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+/* Close-on-outside-press for menus and popovers. Registration is deferred a
+   tick so the press that opened the popover can't immediately close it. */
+const useClickOutside=(ref,onOutside)=>{
+  const cb=useRef(onOutside);cb.current=onOutside;
+  useEffect(()=>{
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target))cb.current();};
+    const t=setTimeout(()=>document.addEventListener('mousedown',h),0);
+    return()=>{clearTimeout(t);document.removeEventListener('mousedown',h);};
+  },[]);
+};
+
+/* Position a fixed-position popover near an anchor rect: below when it fits,
+   above otherwise, clamped inside the viewport. dx nudges the left edge. */
+const placePopover=(r,{w=300,h=420,dx=0}={})=>{
+  const spaceBelow=window.innerHeight-(r.bottom+4);
+  const top=spaceBelow>=h?r.bottom+4:Math.max(8,r.top-h-4);
+  const left=Math.max(8,Math.min(r.left+dx,window.innerWidth-w-8));
+  return{top,left};
+};
 
 /* ── Color helpers ─────────────────────────────────────────── */
 function hexToHsl(hex){
@@ -164,13 +188,30 @@ const subscribeRemote=async(userId,onRemote)=>{
 // can never freeze sign-in boot on "Loading…".
 const withTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),ms))]);
 
+/* The AI functions (/api/brainy, /api/transcribe) only serve signed-in users
+   so strangers can't spend the API keys. Attach the Supabase session token;
+   local-only mode sends nothing (locally /api/* 404s and the on-device
+   fallback takes over anyway). */
+const authHeader=async()=>{
+  if(!syncEnabled)return{};
+  try{
+    const s=await getSupa();
+    const{data:{session}}=await s.auth.getSession();
+    return session?{Authorization:`Bearer ${session.access_token}`}:{};
+  }catch(e){return{};}
+};
+
 /* The persistence seam the app calls. Always writes the local cache, and
    (when signed in) pushes the same blob to Supabase with a matching
    timestamp. Both are debounced together by the caller. */
-const saveState=s=>{
+const saveState=(s,onResult)=>{
   const ts=new Date().toISOString();
   saveLocal(s,ts);
-  if(syncEnabled&&_syncUserId)pushRemote(_syncUserId,s,ts).catch(()=>{});
+  // Report whether the push actually landed so the UI can stop showing a
+  // green "synced" dot while edits silently pile up on one device.
+  if(syncEnabled&&_syncUserId)pushRemote(_syncUserId,s,ts)
+    .then(r=>onResult&&onResult(!r.error))
+    .catch(()=>onResult&&onResult(false));
 };
 // Clipboard with a textarea/execCommand fallback for browsers that gate
 // navigator.clipboard (older iPad Safari). Resolves true when the copy stuck.
@@ -201,6 +242,30 @@ const importBackup = (file,cb) => {
    recover it from git history if a demo seed is ever needed again.) */
 const makeSeed = () => ({ projects:[], priorityIds:[], completedExpanded:false });
 
+/* Every blob entering the app (local cache, server row, imported backup)
+   passes through here. A malformed blob must degrade to a usable shape —
+   never crash the render, and never get pushed back up to Supabase where it
+   would brick every other device. Unknown extra fields pass through. */
+const normalizeState = raw => {
+  const s = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  const arr = x => Array.isArray(x) ? x : [];
+  return {
+    ...s,
+    projects: arr(s.projects).filter(p => p && typeof p === 'object').map(p => ({
+      ...p,
+      id: String(p.id || uid()),
+      name: typeof p.name === 'string' ? p.name : 'Untitled',
+      color: typeof p.color === 'string' ? p.color : '#C8B8A2',
+      tasks: arr(p.tasks), reminders: arr(p.reminders),
+      events: arr(p.events), notes: arr(p.notes),
+    })),
+    priorityIds: arr(s.priorityIds),
+    collapsedIds: arr(s.collapsedIds),
+    calendarEvents: arr(s.calendarEvents),
+    completedExpanded: !!s.completedExpanded,
+  };
+};
+
 // Which projects render expanded for a given state blob. The collapsed list
 // (state.collapsedIds) is part of the synced state, so a collapsed project
 // stays collapsed across refreshes and sign-ins. Old blobs without the field
@@ -220,6 +285,12 @@ const purgeOldCompleted=s=>{
   const liveIds=new Set(projects.flatMap(p=>p.tasks.map(t=>t.id)));
   return{...s,projects,priorityIds:(s.priorityIds||[]).filter(id=>liveIds.has(id))};
 };
+
+/* Tasks, reminders, and events share one shape and one set of operations;
+   `kind` selects the project array they live in. */
+const KIND_KEY={task:'tasks',reminder:'reminders',event:'events'};
+const sortDoneLast=list=>[...list.filter(i=>!i.done),...list.filter(i=>i.done)];
+const toggleDonePatch=it=>({done:!it.done,completedAt:!it.done?Date.now():null});
 
 /* ── Confirm Dialog ────────────────────────────────────────── */
 const ConfirmDialog = ({message,confirmLabel='Delete',onConfirm,onCancel}) => html`
@@ -257,14 +328,12 @@ const NoteColorPicker = ({projectColor,currentColor,gradientStep,onSelect,onClos
 const ProjectColorPicker = ({current,onSelect,onClose}) => {
   const pickerRef=useRef(null);
   const[pos,setPos]=useState({top:'calc(100% + 6px)',bottom:'auto',left:0});
+  useClickOutside(pickerRef,onClose);
   useEffect(()=>{
     if(!pickerRef.current)return;
     const r=pickerRef.current.getBoundingClientRect();
     if(r.bottom>window.innerHeight-8)setPos({bottom:'calc(100% + 6px)',top:'auto',left:0});
-    const h=e=>{if(pickerRef.current&&!pickerRef.current.contains(e.target))onClose();};
-    setTimeout(()=>document.addEventListener('mousedown',h),0);
-    return()=>document.removeEventListener('mousedown',h);
-  },[onClose]);
+  },[]);
   const rows=[PROJECT_COLORS.slice(0,5),PROJECT_COLORS.slice(5,11),PROJECT_COLORS.slice(11,15),PROJECT_COLORS.slice(15)];
   const labels=['Neutrals','Muted','Warm pastels','Cool pastels'];
   return html`
@@ -283,10 +352,7 @@ const ThreeDotMenu = ({onDelete,onCopyCopilot}) => {
   const[open,setOpen]=useState(false);
   const[copyState,setCopyState]=useState(''); // '' | 'done' | 'err'
   const ref=useRef(null);
-  useEffect(()=>{
-    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
-    document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h);
-  },[]);
+  useClickOutside(ref,()=>setOpen(false));
   // Copy stays in the open menu just long enough to show its ✓ / failure.
   const doCopy=async()=>{
     const ok=await onCopyCopilot();
@@ -515,10 +581,7 @@ const DraggableNotes = ({notes,onReorder,renderNote,noteWidth=220,projectId,onMo
 const NoteThreeDotMenu = ({onDelete,hidden,onToggleHidden}) => {
   const[open,setOpen]=useState(false);
   const ref=useRef(null);
-  useEffect(()=>{
-    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
-    document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h);
-  },[]);
+  useClickOutside(ref,()=>setOpen(false));
   return html`
     <div ref=${ref} style=${{position:'relative'}} onClick=${e=>e.stopPropagation()}>
       <button onClick=${()=>setOpen(p=>!p)}
@@ -551,7 +614,7 @@ const StickyNote = ({note,onUpdate,onDelete,projectColor,noteWidth=220}) => {
   const openCP=e=>{
     e.stopPropagation();
     const r=btnRef.current?.getBoundingClientRect();
-    if(r)setPickerPos({top:Math.min(r.bottom+6,window.innerHeight-300),left:Math.max(4,Math.min(r.left,window.innerWidth-240))});
+    if(r)setPickerPos(placePopover(r,{w:240,h:300}));
     setShowCP(p=>!p);
   };
 
@@ -636,149 +699,76 @@ const StickyNote = ({note,onUpdate,onDelete,projectColor,noteWidth=220}) => {
     <//>`;
 };
 
-/* ── Task Row ──────────────────────────────────────────────── */
-const TaskRow = ({task,onToggleDone,onDelete,onEdit,onTogglePriority,onOpenPicker,accentColor,isPriority=false,compact=false}) => {
+/* ── Item Row (tasks, reminders, events) ───────────────────────
+   One row component for all three item kinds. The kind picks the highlight
+   control: tasks → priority ★, reminders → flag ⚑, events → important ★.
+   The trailing icon group renders only when onToggleHighlight is given
+   (done tasks omit it, matching the original layout). */
+const Checkbox=({checked,color,size=16,onClick})=>html`
+  <div onClick=${onClick} style=${{width:size,height:size,borderRadius:4,flexShrink:0,cursor:'pointer',
+    border:checked?`2px solid ${color}`:'1.5px solid #C8C0B8',background:checked?color:'white',
+    display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s'}}>
+    ${checked&&html`<svg width="8" height="6" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`}
+  </div>`;
+
+const KIND_HIGHLIGHT={
+  task:    {on:'★',off:'☆',color:PRIORITY_COLOR,bg:PRIORITY_BG,onTitle:'Remove priority',offTitle:'Mark priority'},
+  reminder:{on:'⚑',off:'⚑',color:REMINDER_COLOR,bg:REMINDER_BG,onTitle:'Remove flag',offTitle:'Flag reminder'},
+  event:   {on:'★',off:'☆',color:PRIORITY_COLOR,bg:PRIORITY_BG,onTitle:'Remove important',offTitle:'Mark important'},
+};
+const ItemRow = ({item,kind='task',highlighted=false,onToggleDone,onToggleHighlight,onDelete,onEdit,onOpenPicker,accentColor}) => {
+  const hl=KIND_HIGHLIGHT[kind];
   const[hov,setHov]=useState(false);
   const[editing,setEditing]=useState(false);
-  const[draft,setDraft]=useState(task.text);
+  const[draft,setDraft]=useState(item.text);
   const inputRef=useRef(null);
   const rowRef=useRef(null);
   useEffect(()=>{if(editing)inputRef.current?.focus();},[editing]);
-  const commitEdit=()=>{setEditing(false);if(draft.trim()&&draft.trim()!==task.text)onEdit(task.id,draft.trim());else setDraft(task.text);};
+  const commitEdit=()=>{setEditing(false);if(draft.trim()&&draft.trim()!==item.text)onEdit(item.id,draft.trim());else setDraft(item.text);};
+  // Generous touch target: a pen/finger tap near the checkbox toggles done.
   const onPD=e=>{
     if(e.pointerType!=='pen'&&e.pointerType!=='touch')return;
     const r=rowRef.current?.getBoundingClientRect();if(!r)return;
     const x=e.clientX-r.left,y=e.clientY-r.top;
-    if(Math.sqrt((x-(compact?10:14))**2+(y-r.height/2)**2)<28){e.preventDefault();onToggleDone(task.id);}
+    if(Math.sqrt((x-14)**2+(y-r.height/2)**2)<28){e.preventDefault();onToggleDone(item.id);}
   };
   return html`
     <div ref=${rowRef} onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)} onPointerDown=${onPD}
-      style=${{display:'flex',alignItems:'center',gap:8,padding:compact?'5px 10px':'8px 14px',borderRadius:8,
-        background:isPriority?PRIORITY_BG:hov?'rgba(0,0,0,0.025)':'transparent',transition:'background 0.12s',userSelect:'none'}}>
-      <div onClick=${()=>onToggleDone(task.id)} style=${{width:compact?14:16,height:compact?14:16,borderRadius:4,flexShrink:0,cursor:'pointer',border:task.done?`2px solid ${accentColor}`:'1.5px solid #C8C0B8',background:task.done?accentColor:'white',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s'}}>
-        ${task.done&&html`<svg width="8" height="6" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`}
-      </div>
-      ${editing?html`<input ref=${inputRef} value=${draft} onInput=${e=>setDraft(e.target.value)} onBlur=${commitEdit} onKeyDown=${e=>{if(e.key==='Enter')commitEdit();if(e.key==='Escape'){setEditing(false);setDraft(task.text);}}} style=${{flex:1,border:'none',outline:'none',background:'rgba(0,0,0,0.04)',borderRadius:4,padding:'2px 6px',fontSize:compact?12:13.5,color:'#2A2825'}}/>`
-        :html`<span style=${{flex:1,fontSize:compact?12:13.5,textDecoration:task.done?'line-through':'none',color:task.done?'#B0A898':'#2A2825',lineHeight:1.3,cursor:compact?'default':'text'}} onDblClick=${e=>{e.stopPropagation();if(!compact){setEditing(true);setDraft(task.text);}}}>${task.text}</span>`}
-      ${!compact&&onTogglePriority&&html`
+      style=${{display:'flex',alignItems:'center',gap:8,padding:'8px 14px',borderRadius:8,
+        background:highlighted?hl.bg:hov?'rgba(0,0,0,0.025)':'transparent',transition:'background 0.12s',userSelect:'none'}}>
+      <${Checkbox} checked=${item.done} color=${accentColor} onClick=${()=>onToggleDone(item.id)}/>
+      ${editing?html`<input ref=${inputRef} value=${draft} onInput=${e=>setDraft(e.target.value)} onBlur=${commitEdit} onKeyDown=${e=>{if(e.key==='Enter')commitEdit();if(e.key==='Escape'){setEditing(false);setDraft(item.text);}}} style=${{flex:1,border:'none',outline:'none',background:'rgba(0,0,0,0.04)',borderRadius:4,padding:'2px 6px',fontSize:13.5,color:'#2A2825'}}/>`
+        :html`<span style=${{flex:1,fontSize:13.5,textDecoration:item.done?'line-through':'none',color:item.done?'#B0A898':'#2A2825',lineHeight:1.3,cursor:'text'}} onDblClick=${e=>{e.stopPropagation();setEditing(true);setDraft(item.text);}}>
+            ${item.text}
+            ${kind==='event'&&item.taskTime&&html`<span style=${{fontSize:11,color:'#9A9088',marginLeft:4}}>
+              ${fmtTime(item.taskTime)}${item.endTime?'–'+fmtTime(item.endTime):''}
+            </span>`}
+            ${kind==='event'&&item.endDate&&item.dueDate&&html`<span title="Spans ${isoToLong(item.dueDate)} – ${isoToLong(item.endDate)}" style=${{fontSize:11,color:'#5B8FBF',marginLeft:4,whiteSpace:'nowrap'}}>
+              ${isoToShort(item.dueDate)}–${isoToShort(item.endDate)}
+            </span>`}
+          </span>`}
+      ${onToggleHighlight&&html`
         <div style=${{display:'flex',alignItems:'center',gap:2,flexShrink:0,marginLeft:'auto'}}>
           <!-- Calendar assign icon -->
           ${onOpenPicker
-            ? html`<button onClick=${e=>{e.stopPropagation();onOpenPicker(e,task);}} title="Assign to a day"
-                style=${{...ICON_BTN,color:task.dueDate?'#5B8FBF':'#D0C8C0'}}><${CalIcon}/></button>`
+            ? html`<button onClick=${e=>{e.stopPropagation();onOpenPicker(e,item);}} title="Assign to a day"
+                style=${{...ICON_BTN,color:item.dueDate?'#5B8FBF':'#D0C8C0'}}><${CalIcon}/></button>`
             : html`<span style=${ICON_SLOT}/>`}
-          <button onClick=${e=>{e.stopPropagation();onTogglePriority(task.id);}}
-            title=${isPriority?'Remove priority':'Mark priority'}
-            style=${{...ICON_BTN,fontSize:13,color:isPriority?PRIORITY_COLOR:'#D0C8C0'}}>
-            ${isPriority?'★':'☆'}
+          <button onClick=${e=>{e.stopPropagation();onToggleHighlight(item.id);}}
+            title=${highlighted?hl.onTitle:hl.offTitle}
+            style=${{...ICON_BTN,fontSize:13,color:highlighted?hl.color:'#D0C8C0'}}>
+            ${highlighted?hl.on:hl.off}
           </button>
-          <button onClick=${e=>{e.stopPropagation();onDelete(task.id);}}
+          <button onClick=${e=>{e.stopPropagation();onDelete(item.id);}}
             style=${{...ICON_BTN,fontSize:13,color:'#C0B8B0',
               opacity:hov&&!editing?1:0,transition:'opacity 0.15s',
               pointerEvents:hov&&!editing?'auto':'none'}}>×</button>
-        </div>`}
-      ${compact&&hov&&!editing&&onDelete&&html`<button onClick=${()=>onDelete(task.id)} style=${{background:'none',border:'none',color:'#C0B8B0',fontSize:13,cursor:'pointer',lineHeight:1,padding:'1px 3px',flexShrink:0}}>×</button>`}
-    </div>`;
-};
-
-/* ── Reminder Row ──────────────────────────────────────────── */
-const ReminderRow = ({reminder,onToggleDone,onToggleFlag,onDelete,onEdit,onOpenPicker,accentColor,compact=false}) => {
-  const[hov,setHov]=useState(false);
-  const[editing,setEditing]=useState(false);
-  const[draft,setDraft]=useState(reminder.text);
-  const inputRef=useRef(null);
-  const rowRef=useRef(null);
-  useEffect(()=>{if(editing)inputRef.current?.focus();},[editing]);
-  const commitEdit=()=>{setEditing(false);if(draft.trim()&&draft.trim()!==reminder.text)onEdit(reminder.id,draft.trim());else setDraft(reminder.text);};
-  const calBtnRef=useRef(null);
-  // picker lifted to ProjectStrip
-  const onPD=e=>{
-    if(e.pointerType!=='pen'&&e.pointerType!=='touch')return;
-    const r=rowRef.current?.getBoundingClientRect();if(!r)return;
-    const x=e.clientX-r.left,y=e.clientY-r.top;
-    if(Math.sqrt((x-(compact?10:14))**2+(y-r.height/2)**2)<28){e.preventDefault();onToggleDone(reminder.id);}
-  };
-  const flagColor=reminder.flagged?REMINDER_COLOR:'#D0C8C0';
-  const bg=reminder.flagged&&!compact?REMINDER_BG:hov?'rgba(0,0,0,0.025)':'transparent';
-  return html`
-    <div ref=${rowRef} onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)} onPointerDown=${onPD}
-      style=${{display:'flex',alignItems:'center',gap:8,padding:compact?'5px 10px':'8px 14px',borderRadius:8,background:bg,transition:'background 0.12s',userSelect:'none'}}>
-      <div onClick=${()=>onToggleDone(reminder.id)} style=${{width:compact?14:16,height:compact?14:16,borderRadius:4,flexShrink:0,cursor:'pointer',border:reminder.done?`2px solid ${accentColor||REMINDER_COLOR}`:'1.5px solid #C8C0B8',background:reminder.done?(accentColor||REMINDER_COLOR):'white',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s'}}>
-        ${reminder.done&&html`<svg width="8" height="6" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`}
-      </div>
-      ${editing?html`<input ref=${inputRef} value=${draft} onInput=${e=>setDraft(e.target.value)} onBlur=${commitEdit} onKeyDown=${e=>{if(e.key==='Enter')commitEdit();if(e.key==='Escape'){setEditing(false);setDraft(reminder.text);}}} style=${{flex:1,border:'none',outline:'none',background:'rgba(0,0,0,0.04)',borderRadius:4,padding:'2px 6px',fontSize:compact?12:13.5,color:'#2A2825'}}/>`
-        :html`<span style=${{flex:1,fontSize:compact?12:13.5,textDecoration:reminder.done?'line-through':'none',color:reminder.done?'#B0A898':'#2A2825',lineHeight:1.3,cursor:compact?'default':'text'}} onDblClick=${e=>{e.stopPropagation();if(!compact){setEditing(true);setDraft(reminder.text);}}}>${reminder.text}</span>`}
-      ${!compact&&html`
-        <div style=${{display:'flex',alignItems:'center',gap:2,flexShrink:0,marginLeft:'auto'}}>
-          <!-- Calendar assign -->
-          ${onOpenPicker
-            ? html`<button onClick=${e=>{e.stopPropagation();onOpenPicker(e,reminder);}} title="Assign to a day"
-                style=${{...ICON_BTN,color:reminder.dueDate?'#5B8FBF':'#D0C8C0'}}><${CalIcon}/></button>`
-            : html`<span style=${ICON_SLOT}/>`}
-          <!-- Flag -->
-          <button onClick=${e=>{e.stopPropagation();onToggleFlag(reminder.id);}}
-            title=${reminder.flagged?'Remove flag':'Flag reminder'}
-            style=${{...ICON_BTN,fontSize:13,color:flagColor}}>⚑</button>
-          <!-- Delete -->
-          <button onClick=${e=>{e.stopPropagation();onDelete(reminder.id);}}
-            style=${{...ICON_BTN,fontSize:13,color:'#C0B8B0',
-              opacity:hov&&!editing?1:0,transition:'opacity 0.15s',pointerEvents:hov&&!editing?'auto':'none'}}>×</button>
         </div>`}
     </div>`;
 };
 
 /* ── Project Strip ─────────────────────────────────────────── */
-/* ── Event Row ─────────────────────────────────────────────── */
-const EventRow = ({event,onToggleDone,onDelete,onEdit,onOpenPicker,onToggleImportant,accentColor}) => {
-  const[hov,setHov]=useState(false);
-  const[editing,setEditing]=useState(false);
-  const[draft,setDraft]=useState(event.text);
-  const inputRef=useRef(null);
-  useEffect(()=>{if(editing)inputRef.current?.focus();},[editing]);
-  const commitEdit=()=>{setEditing(false);if(draft.trim()&&draft.trim()!==event.text)onEdit(event.id,draft.trim());else setDraft(event.text);};
-  const isImportant=event.important||false;
-  const bg=isImportant?PRIORITY_BG:hov?'rgba(0,0,0,0.025)':'transparent';
-  return html`
-    <div onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)}
-      style=${{display:'flex',alignItems:'center',gap:8,padding:'8px 14px',borderRadius:8,
-        background:bg,transition:'background 0.12s',userSelect:'none'}}>
-      <div onClick=${()=>onToggleDone(event.id)}
-        style=${{width:16,height:16,borderRadius:4,flexShrink:0,cursor:'pointer',
-          border:event.done?`2px solid ${accentColor}`:'1.5px solid #C8C0B8',
-          background:event.done?accentColor:'white',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s'}}>
-        ${event.done&&html`<svg width="8" height="6" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`}
-      </div>
-      ${editing
-        ?html`<input ref=${inputRef} value=${draft} onInput=${e=>setDraft(e.target.value)}
-            onBlur=${commitEdit} onKeyDown=${e=>{if(e.key==='Enter')commitEdit();if(e.key==='Escape'){setEditing(false);setDraft(event.text);}}}
-            style=${{flex:1,border:'none',outline:'none',background:'rgba(0,0,0,0.04)',borderRadius:4,padding:'2px 6px',fontSize:13.5,color:'#2A2825'}}/>`
-        :html`<span style=${{flex:1,fontSize:13.5,textDecoration:event.done?'line-through':'none',
-            color:event.done?'#B0A898':'#2A2825',lineHeight:1.3,cursor:'text'}}
-            onDblClick=${e=>{e.stopPropagation();setEditing(true);setDraft(event.text);}}>
-            ${event.text}
-            ${event.taskTime&&html`<span style=${{fontSize:11,color:'#9A9088',marginLeft:4}}>
-              ${fmtTime(event.taskTime)}${event.endTime?'–'+fmtTime(event.endTime):''}
-            </span>`}
-            ${event.endDate&&event.dueDate&&html`<span title="Spans ${isoToLong(event.dueDate)} – ${isoToLong(event.endDate)}" style=${{fontSize:11,color:'#5B8FBF',marginLeft:4,whiteSpace:'nowrap'}}>
-              ${isoToShort(event.dueDate)}–${isoToShort(event.endDate)}
-            </span>`}
-          </span>`}
-      <div style=${{display:'flex',alignItems:'center',gap:2,flexShrink:0,marginLeft:'auto'}}>
-        <button onClick=${e=>{e.stopPropagation();onOpenPicker(e,event);}} title="Assign to a day"
-          style=${{...ICON_BTN,color:event.dueDate?'#5B8FBF':'#D0C8C0'}}><${CalIcon}/></button>
-        <button onClick=${e=>{e.stopPropagation();onToggleImportant(event.id);}}
-          title=${isImportant?'Remove important':'Mark important'}
-          style=${{...ICON_BTN,fontSize:13,color:isImportant?PRIORITY_COLOR:'#D0C8C0'}}>
-          ${isImportant?'★':'☆'}
-        </button>
-        <button onClick=${e=>{e.stopPropagation();onDelete(event.id);}}
-          style=${{...ICON_BTN,fontSize:13,color:'#C0B8B0',opacity:hov?1:0,transition:'opacity 0.15s',
-            pointerEvents:hov?'auto':'none'}}>×</button>
-      </div>
-    </div>`;
-};
-
-const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds,onTogglePriority,masterCollapsed,openColorPickerId,setOpenColorPickerId,weeks=1,onMoveNote,onCopyCopilot}) => {
+const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds,onTogglePriority,masterCollapsed,openColorPickerId,setOpenColorPickerId,weeks=1,onMoveNote,onCopyCopilot,onPatchItem,onAddItem,onRemoveItem,onSetSchedule}) => {
   const[newTask,setNewTask]=useState('');
   const[newReminder,setNewReminder]=useState('');
   const[newEvent,setNewEvent]=useState('');
@@ -790,47 +780,32 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
   const[eventPickerData,setEventPickerData]=useState(null);
   const[itemPickerData,setItemPickerData]=useState(null); // {item, kind, top, left}
   const openItemPicker=(e,item,kind)=>{
-    const r=e.currentTarget.getBoundingClientRect();
-    const pH=420,pW=300,spaceBelow=window.innerHeight-(r.bottom+4);
-    const top=spaceBelow>=pH?r.bottom+4:Math.max(8,r.top-pH-4);
-    const left=Math.max(8,Math.min(r.left-120,window.innerWidth-pW-8));
-    setItemPickerData({item,kind,top,left});
+    setItemPickerData({item,kind,...placePopover(e.currentTarget.getBoundingClientRect(),{dx:-120})});
   };
   const openEventPicker=(e,ev)=>{
-    const r=e.currentTarget.getBoundingClientRect();
-    const pickerH=440,pickerW=300;
-    const spaceBelow=window.innerHeight-(r.bottom+4);
-    const top=spaceBelow>=pickerH
-      ?r.bottom+4
-      :Math.max(8,r.top-pickerH-4);
-    const left=Math.max(8,Math.min(r.left,window.innerWidth-pickerW-8));
-    setEventPickerData({event:ev,top,left});
+    setEventPickerData({event:ev,...placePopover(e.currentTarget.getBoundingClientRect(),{h:440})});
   };
   const nameInputRef=useRef(null);
   const isColorOpen=openColorPickerId===project.id;
   useEffect(()=>{if(editingName)nameInputRef.current?.focus();},[editingName]);
 
-  const updateTasks=t=>onUpdate({...project,tasks:t});
-  const updateReminders=r=>onUpdate({...project,reminders:r});
   const updateNotes=n=>onUpdate({...project,notes:n});
-  const addTask=()=>{const{text,due}=extractDue(newTask);if(!text)return;updateTasks([...project.tasks,{id:uid(),text,done:false,...(due?{dueDate:due}:{})}]);setNewTask('');};
-  const toggleDone=id=>{const tasks=project.tasks.map(t=>t.id===id?{...t,done:!t.done,completedAt:!t.done?Date.now():null}:t);updateTasks([...tasks.filter(t=>!t.done),...tasks.filter(t=>t.done)]);};
-  const deleteTask=id=>updateTasks(project.tasks.filter(t=>t.id!==id));
-  const editTask=(id,text)=>updateTasks(project.tasks.map(t=>t.id===id?{...t,text}:t));
-  const assignDay=(id,day,time,end)=>updateTasks(project.tasks.map(t=>t.id===id?{...t,dueDate:day,taskTime:time,endTime:end}:t));
-  const addReminder=()=>{const{text,due}=extractDue(newReminder);if(!text)return;updateReminders([...(project.reminders||[]),{id:uid(),text,done:false,flagged:false,...(due?{dueDate:due}:{})}]);setNewReminder('');};
-  const toggleReminderDone=id=>{const r=(project.reminders||[]).map(x=>x.id===id?{...x,done:!x.done,completedAt:!x.done?Date.now():null}:x);updateReminders([...r.filter(x=>!x.done),...r.filter(x=>x.done)]);};
-  const toggleReminderFlag=id=>updateReminders((project.reminders||[]).map(r=>r.id===id?{...r,flagged:!r.flagged}:r));
-  const deleteReminder=id=>updateReminders((project.reminders||[]).filter(r=>r.id!==id));
-  const editReminder=(id,text)=>updateReminders((project.reminders||[]).map(r=>r.id===id?{...r,text}:r));
-  const updateEvents=ev=>onUpdate({...project,events:ev});
-  const addEvent=(raw)=>{const{text,due}=extractDue(raw||'');if(!text)return;updateEvents([...(project.events||[]),{id:uid(),text,done:false,important:false,dueDate:due,taskTime:null,endTime:null}]);};
-  const toggleEventDone=id=>{const ev=(project.events||[]).map(e=>e.id===id?{...e,done:!e.done,completedAt:!e.done?Date.now():null}:e);updateEvents([...ev.filter(e=>!e.done),...ev.filter(e=>e.done)]);};
-  const deleteEvent=id=>updateEvents((project.events||[]).filter(e=>e.id!==id));
-  const editEvent=(id,text)=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,text}:e));
-  const toggleEventImportant=id=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,important:!e.important}:e));
-  const assignEventDay=(id,day,time,end,endDate=null)=>updateEvents((project.events||[]).map(e=>e.id===id?{...e,dueDate:day,taskTime:time,endTime:end,endDate}:e));
-  const assignReminderDay=(id,day,time,end)=>updateReminders((project.reminders||[]).map(r=>r.id===id?{...r,dueDate:day,taskTime:time,endTime:end}:r));
+  // Item CRUD is thin sugar over the App-level generics (see patchItem).
+  const pid=project.id;
+  const addTask=()=>{const{text,due}=extractDue(newTask);if(!text)return;onAddItem(pid,'task',{text,...(due?{dueDate:due}:{})});setNewTask('');};
+  const toggleDone=id=>onPatchItem(pid,'task',id,toggleDonePatch,true);
+  const deleteTask=id=>onRemoveItem(pid,'task',id);
+  const editTask=(id,text)=>onPatchItem(pid,'task',id,{text});
+  const addReminder=()=>{const{text,due}=extractDue(newReminder);if(!text)return;onAddItem(pid,'reminder',{text,flagged:false,...(due?{dueDate:due}:{})});setNewReminder('');};
+  const toggleReminderDone=id=>onPatchItem(pid,'reminder',id,toggleDonePatch,true);
+  const toggleReminderFlag=id=>onPatchItem(pid,'reminder',id,r=>({flagged:!r.flagged}));
+  const deleteReminder=id=>onRemoveItem(pid,'reminder',id);
+  const editReminder=(id,text)=>onPatchItem(pid,'reminder',id,{text});
+  const addEvent=raw=>{const{text,due}=extractDue(raw||'');if(!text)return;onAddItem(pid,'event',{text,important:false,dueDate:due,taskTime:null,endTime:null});};
+  const toggleEventDone=id=>onPatchItem(pid,'event',id,toggleDonePatch,true);
+  const deleteEvent=id=>onRemoveItem(pid,'event',id);
+  const editEvent=(id,text)=>onPatchItem(pid,'event',id,{text});
+  const toggleEventImportant=id=>onPatchItem(pid,'event',id,e=>({important:!e.important}));
   const addNote=()=>updateNotes([...project.notes,{id:uid(),title:'',text:'',color:defaultNoteColor(project.color),gradientStep:null,checklistItems:[],collapsed:false}]);
   const updateNote=u=>updateNotes(project.notes.map(n=>n.id===u.id?u:n));
   const deleteNote=id=>updateNotes(project.notes.filter(n=>n.id!==id));
@@ -900,8 +875,8 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
                 </div>
                 <div>
                   ${activeTasks.length===0&&doneTasks.length===0&&html`<div style=${{padding:'6px 14px 4px',color:'#C0B8B0',fontSize:12,fontStyle:'italic'}}>No tasks yet</div>`}
-                  ${activeTasks.map(t=>html`<${TaskRow} key=${t.id} task=${t} onToggleDone=${toggleDone} onDelete=${deleteTask} onEdit=${editTask} onTogglePriority=${onTogglePriority} onOpenPicker=${(e,t)=>openItemPicker(e,t,'task')} accentColor=${project.color} isPriority=${priorityIds.includes(t.id)}/>`)}
-                  ${doneTasks.map(t=>html`<${TaskRow} key=${t.id} task=${t} onToggleDone=${toggleDone} onDelete=${deleteTask} onEdit=${editTask} accentColor=${project.color}/>`)}
+                  ${activeTasks.map(t=>html`<${ItemRow} key=${t.id} kind="task" item=${t} highlighted=${priorityIds.includes(t.id)} onToggleDone=${toggleDone} onDelete=${deleteTask} onEdit=${editTask} onToggleHighlight=${onTogglePriority} onOpenPicker=${(e,t)=>openItemPicker(e,t,'task')} accentColor=${project.color}/>`)}
+                  ${doneTasks.map(t=>html`<${ItemRow} key=${t.id} kind="task" item=${t} onToggleDone=${toggleDone} onDelete=${deleteTask} onEdit=${editTask} accentColor=${project.color}/>`)}
                 </div>
                 <div style=${{display:'flex',alignItems:'center',gap:8,padding:'4px 14px 10px',borderTop:'1px solid #F7F3EF',marginTop:2}}>
                   <div style=${{width:15,height:15,borderRadius:3,border:'1.5px dashed #C8C0B8',flexShrink:0}}/>
@@ -914,8 +889,8 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
                 </div>
                 <div>
                   ${activeReminders.length===0&&doneReminders.length===0&&html`<div style=${{padding:'6px 14px 4px',color:'#C0B8B0',fontSize:12,fontStyle:'italic'}}>No reminders yet</div>`}
-                  ${activeReminders.map(r=>html`<${ReminderRow} key=${r.id} reminder=${r} onToggleDone=${toggleReminderDone} onToggleFlag=${toggleReminderFlag} onDelete=${deleteReminder} onEdit=${editReminder} onOpenPicker=${(e,r)=>openItemPicker(e,r,'reminder')} accentColor=${project.color}/>`)}
-                  ${doneReminders.map(r=>html`<${ReminderRow} key=${r.id} reminder=${r} onToggleDone=${toggleReminderDone} onToggleFlag=${toggleReminderFlag} onDelete=${deleteReminder} onEdit=${editReminder} onOpenPicker=${(e,r)=>openItemPicker(e,r,'reminder')} accentColor=${project.color}/>`)}
+                  ${activeReminders.map(r=>html`<${ItemRow} key=${r.id} kind="reminder" item=${r} highlighted=${r.flagged} onToggleDone=${toggleReminderDone} onToggleHighlight=${toggleReminderFlag} onDelete=${deleteReminder} onEdit=${editReminder} onOpenPicker=${(e,r)=>openItemPicker(e,r,'reminder')} accentColor=${project.color}/>`)}
+                  ${doneReminders.map(r=>html`<${ItemRow} key=${r.id} kind="reminder" item=${r} highlighted=${r.flagged} onToggleDone=${toggleReminderDone} onToggleHighlight=${toggleReminderFlag} onDelete=${deleteReminder} onEdit=${editReminder} onOpenPicker=${(e,r)=>openItemPicker(e,r,'reminder')} accentColor=${project.color}/>`)}
                 </div>
                 <div style=${{display:'flex',alignItems:'center',gap:8,padding:'4px 14px 14px',borderTop:'1px solid #F7F3EF',marginTop:2}}>
                   <div style=${{width:15,height:15,borderRadius:3,border:'1.5px dashed #C8C0B8',flexShrink:0}}/>
@@ -959,13 +934,13 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
                 </div>
                 <div style=${{flex:1,overflowY:'auto'}}>
                   ${(project.events||[]).length===0&&html`<div style=${{padding:'6px 14px 4px',color:'#C0B8B0',fontSize:12,fontStyle:'italic'}}>No events yet</div>`}
-                  ${(project.events||[]).filter(e=>!e.done).map(e=>html`<${EventRow} key=${e.id} event=${e}
+                  ${(project.events||[]).filter(e=>!e.done).map(e=>html`<${ItemRow} key=${e.id} kind="event" item=${e} highlighted=${!!e.important}
                     onToggleDone=${toggleEventDone} onDelete=${deleteEvent} onEdit=${editEvent}
-                    onOpenPicker=${openEventPicker} onToggleImportant=${toggleEventImportant}
+                    onOpenPicker=${openEventPicker} onToggleHighlight=${toggleEventImportant}
                     accentColor=${project.color}/>`)}
-                  ${(project.events||[]).filter(e=>e.done&&!e.archived).map(e=>html`<${EventRow} key=${e.id} event=${e}
+                  ${(project.events||[]).filter(e=>e.done&&!e.archived).map(e=>html`<${ItemRow} key=${e.id} kind="event" item=${e} highlighted=${!!e.important}
                     onToggleDone=${toggleEventDone} onDelete=${deleteEvent} onEdit=${editEvent}
-                    onOpenPicker=${openEventPicker} onToggleImportant=${toggleEventImportant}
+                    onOpenPicker=${openEventPicker} onToggleHighlight=${toggleEventImportant}
                     accentColor=${project.color}/>`)}
                 </div>
                 <div style=${{display:'flex',alignItems:'center',gap:8,padding:'4px 14px 14px',borderTop:'1px solid #F7F3EF',marginTop:2}}>
@@ -983,16 +958,12 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
       </div>
       ${eventPickerData&&html`<div style=${{position:'fixed',top:eventPickerData.top,left:eventPickerData.left,zIndex:9999}}>
         <${DayTimePicker} task=${eventPickerData.event} isEvent=${true} weeks=${weeks}
-          onAssign=${(day,time,end,endDate)=>{assignEventDay(eventPickerData.event.id,day,time,end,endDate);setEventPickerData(null);}}
+          onAssign=${(day,time,end,endDate)=>{onSetSchedule(pid,'event',eventPickerData.event.id,day,time,end,endDate);setEventPickerData(null);}}
           onClose=${()=>setEventPickerData(null)}/>
       </div>`}
       ${itemPickerData&&html`<div style=${{position:'fixed',top:itemPickerData.top,left:itemPickerData.left,zIndex:9999}}>
         <${DayTimePicker} task=${itemPickerData.item} weeks=${weeks}
-          onAssign=${(day,time,end)=>{
-            if(itemPickerData.kind==='task')assignDay(itemPickerData.item.id,day,time,end);
-            else assignReminderDay(itemPickerData.item.id,day,time,end);
-            setItemPickerData(null);
-          }}
+          onAssign=${(day,time,end)=>{onSetSchedule(pid,itemPickerData.kind,itemPickerData.item.id,day,time,end);setItemPickerData(null);}}
           onClose=${()=>setItemPickerData(null)}/>
       </div>`}
     <//>`;
@@ -1052,7 +1023,7 @@ const DraggableProjects = ({projects,onReorder,renderProject}) => {
 
 /* ── Master Panel ──────────────────────────────────────────── */
 /* ── Master Item (top-level to prevent remount on every render) ── */
-const MasterItem = ({item,onToggleDone,onToggleReminderDone,onToggleEventDone,onTogglePriority,onAssignDay,priorityIds,weeks=1}) => {
+const MasterItem = ({item,onToggle,onTogglePriority,onAssignDay,priorityIds,weeks=1}) => {
   const[hov,setHov]=useState(false);
   const[showPicker,setShowPicker]=useState(false);
   const[pickerPos,setPickerPos]=useState({top:0,left:0});
@@ -1062,21 +1033,14 @@ const MasterItem = ({item,onToggleDone,onToggleReminderDone,onToggleEventDone,on
     e.stopPropagation();
     const r=pickerRef.current?.getBoundingClientRect();
     if(!r)return;
-    const pickerH=420,pickerW=300;
-    const spaceBelow=window.innerHeight-(r.bottom+4);
-    const top=spaceBelow>=pickerH?r.bottom+4:Math.max(8,r.top-pickerH-4);
-    const left=Math.max(8,Math.min(r.left,window.innerWidth-pickerW-8));
-    setPickerPos({top,left});
+    setPickerPos(placePopover(r));
     setShowPicker(p=>!p);
   };
   return html`
     <${Fragment}>
     <div onMouseEnter=${()=>setHov(true)} onMouseLeave=${()=>setHov(false)}
       style=${{display:'flex',alignItems:'center',gap:6,padding:'5px 10px',borderRadius:6,background:hov?'rgba(0,0,0,0.025)':'transparent',transition:'background 0.12s',userSelect:'none'}}>
-      <div onClick=${()=>item.kind==='event'?(onToggleEventDone&&onToggleEventDone(item.projectId,item.id)):item.kind==='reminder'?onToggleReminderDone(item.projectId,item.id):onToggleDone(item.projectId,item.id)}
-        style=${{width:14,height:14,borderRadius:3,flexShrink:0,cursor:'pointer',border:item.done?`2px solid ${item.projectColor}`:'1.5px solid #C8C0B8',background:item.done?item.projectColor:'white',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s'}}>
-        ${item.done&&html`<svg width="7" height="6" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`}
-      </div>
+      <${Checkbox} checked=${item.done} color=${item.projectColor} size=${14} onClick=${()=>onToggle(item.projectId,item.kind,item.id)}/>
       <div style=${{width:6,height:6,borderRadius:'50%',background:item.projectColor,flexShrink:0}}/>
       <span style=${{flex:1,fontSize:12,textDecoration:item.done?'line-through':'none',color:item.done?'#B0A898':'#2A2825',lineHeight:1.3}}>${item.text}</span>
       ${item.dueDate&&!item.done&&item.dueDate<todayISO()&&html`<span title="Was due ${isoToLong(item.dueDate)}" style=${{flexShrink:0,fontSize:9.5,fontWeight:600,color:'#C7493A',background:'rgba(199,73,58,0.12)',borderRadius:4,padding:'1px 5px',marginRight:2}}>${isoToMDY(item.dueDate)}</span>`}
@@ -1096,12 +1060,12 @@ const MasterItem = ({item,onToggleDone,onToggleReminderDone,onToggleEventDone,on
       </div>
     </div>
     ${showPicker&&html`<div style=${{position:'fixed',top:pickerPos.top,left:pickerPos.left,zIndex:3000}}>
-      <${DayTimePicker} task=${item} weeks=${weeks} onAssign=${(day,time,end)=>{onAssignDay(item.projectId,item.id,day,time,end);setShowPicker(false);}} onClose=${()=>setShowPicker(false)}/>
+      <${DayTimePicker} task=${item} weeks=${weeks} onAssign=${(day,time,end)=>{onAssignDay(item.projectId,item.kind,item.id,day,time,end);setShowPicker(false);}} onClose=${()=>setShowPicker(false)}/>
     </div>`}
     <//>`;
 };
 
-const MasterPanel = ({projects,priorityIds,onToggleDone,onTogglePriority,onToggleReminderDone,onToggleEventDone,onAssignDay,onReorderPriority,onEmptyCompleted,completedExpanded,onToggleCompleted,collapsed,onToggleCollapse,weeks=1,width=260}) => {
+const MasterPanel = ({projects,priorityIds,onToggle,onTogglePriority,onAssignDay,onReorderPriority,onEmptyCompleted,completedExpanded,onToggleCompleted,collapsed,onToggleCollapse,weeks=1,width=260}) => {
   const[confirmEmpty,setConfirmEmpty]=useState(false);
   const[priDragOver,setPriDragOver]=useState(null);
   const priDragId=useRef(null);
@@ -1137,7 +1101,7 @@ const MasterPanel = ({projects,priorityIds,onToggleDone,onTogglePriority,onToggl
         ${overdueItems.length>0&&html`<div style=${{marginBottom:8}}>
           <div style=${{padding:'5px 14px 2px',fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#C7493A',fontWeight:600}}>⚠ Overdue (${overdueItems.length})</div>
           ${overdueItems.map(it=>html`<div key=${it.id} style=${{borderLeft:'3px solid #C7493A',marginBottom:1,background:'rgba(199,73,58,0.05)'}}>
-            <${MasterItem} item=${it} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>
+            <${MasterItem} item=${it} onToggle=${onToggle} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>
           </div>`)}
         </div>`}
         ${priTasks.length>0&&html`<div style=${{marginBottom:8}}>
@@ -1145,19 +1109,19 @@ const MasterPanel = ({projects,priorityIds,onToggleDone,onTogglePriority,onToggl
           ${priTasks.map(task=>html`
             <div key=${task.id} draggable onDragStart=${e=>{priDragId.current=task.id;e.dataTransfer.effectAllowed='move';}} onDragOver=${e=>{e.preventDefault();setPriDragOver(task.id);}} onDrop=${e=>{e.preventDefault();setPriDragOver(null);if(priDragId.current&&priDragId.current!==task.id)onReorderPriority(priDragId.current,task.id);priDragId.current=null;}}
               style=${{borderLeft:`3px solid ${PRIORITY_COLOR}`,marginBottom:1,cursor:'grab',background:priDragOver===task.id?'rgba(212,117,138,0.07)':'rgba(212,117,138,0.03)'}}>
-              <${MasterItem} item=${task} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>
+              <${MasterItem} item=${task} onToggle=${onToggle} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>
             </div>`)}
         </div>`}
         ${flaggedReminders.length>0&&html`<div style=${{marginBottom:8}}>
           <div style=${{padding:'5px 14px 2px',fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:REMINDER_COLOR,fontWeight:600}}>⚑ Reminders</div>
-          ${flaggedReminders.map(r=>html`<div key=${r.id} style=${{borderLeft:`3px solid ${REMINDER_COLOR}`,marginBottom:1,background:'rgba(91,143,191,0.03)'}}><${MasterItem} item=${r} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/></div>`)}
+          ${flaggedReminders.map(r=>html`<div key=${r.id} style=${{borderLeft:`3px solid ${REMINDER_COLOR}`,marginBottom:1,background:'rgba(91,143,191,0.03)'}}><${MasterItem} item=${r} onToggle=${onToggle} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/></div>`)}
         </div>`}
         ${normalGroups.map(p=>html`<div key=${p.id} style=${{marginBottom:10}}>
           <div style=${{display:'flex',alignItems:'center',gap:6,padding:'5px 14px 2px'}}>
             <div style=${{width:6,height:6,borderRadius:'50%',background:p.color,flexShrink:0}}/>
             <span style=${{fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.7px',color:'#9A9088'}}>${p.name}</span>
           </div>
-          ${p.masterTasks.map(task=>html`<${MasterItem} key=${task.id} item=${{...task,kind:'task',projectId:p.id,projectName:p.name,projectColor:p.color}} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>`)}
+          ${p.masterTasks.map(task=>html`<${MasterItem} key=${task.id} item=${{...task,kind:'task',projectId:p.id,projectName:p.name,projectColor:p.color}} onToggle=${onToggle} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>`)}
         </div>`)}
         ${allTasks.length===0&&flaggedReminders.length===0&&completedItems.length===0&&html`
           <div style=${{padding:'28px 14px',color:'#C0B8B0',fontSize:12,textAlign:'center',lineHeight:1.8,fontStyle:'italic'}}>All tasks appear here automatically.<br/>Tap ☆ to mark priority.<br/>Flag ⚑ reminders to surface them here.</div>`}
@@ -1171,7 +1135,7 @@ const MasterPanel = ({projects,priorityIds,onToggleDone,onTogglePriority,onToggl
             </button>
             ${completedExpanded&&html`<button onClick=${()=>setConfirmEmpty(true)} style=${{background:'none',border:'none',cursor:'pointer',fontSize:11,color:'#C0B8B0',textDecoration:'underline',textUnderlineOffset:2,padding:0}}>Empty</button>`}
           </div>
-          ${completedExpanded&&completedItems.map(item=>html`<${MasterItem} key=${item.id} item=${item} onToggleDone=${onToggleDone} onToggleReminderDone=${onToggleReminderDone} onToggleEventDone=${onToggleEventDone} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>`)}
+          ${completedExpanded&&completedItems.map(item=>html`<${MasterItem} key=${item.id} item=${item} onToggle=${onToggle} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>`)}
         </div>`}
       </div>
       ${confirmEmpty&&html`<${ConfirmDialog} message="This will permanently delete all completed tasks and reminders from all projects." confirmLabel="Empty" onConfirm=${()=>{setConfirmEmpty(false);onEmptyCompleted();}} onCancel=${()=>setConfirmEmpty(false)}/>`}
@@ -1212,16 +1176,6 @@ const toISO=d=>`${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`
 const todayISO=()=>toISO(new Date());
 const isoToMDY=iso=>{ if(!iso)return''; const [y,m,d]=iso.split('-'); return `${m}/${d}/${y.slice(2)}`; };
 const isoToLong=iso=>{ if(!iso)return''; const [y,m,d]=iso.split('-').map(Number); const dt=new Date(y,m-1,d); return `${DAY_NAMES[dt.getDay()]} ${MONTH_ABBR[m-1]} ${d}, ${y}`; };
-const parseMDY=str=>{
-  const m=String(str).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
-  if(!m)return null;
-  let mo=+m[1],da=+m[2],yr=+m[3];
-  if(yr<100)yr+=2000;
-  if(mo<1||mo>12||da<1||da>31)return null;
-  const d=new Date(yr,mo-1,da);
-  if(d.getMonth()!==mo-1||d.getDate()!==da)return null;
-  return toISO(d);
-};
 // When no year is given, use this year — but roll to next year if the date already passed.
 const rollYear=(mo,da)=>{
   const now=new Date();
@@ -1339,11 +1293,7 @@ const DayTimePicker = ({task,onAssign,onClose,isEvent=false,weeks=1}) => {
   const nextDayISO=iso=>{const d=new Date(iso);d.setUTCDate(d.getUTCDate()+1);return d.toISOString().slice(0,10);};
   const ref=useRef(null);
 
-  useEffect(()=>{
-    const h=e=>{if(ref.current&&!ref.current.contains(e.target))onClose();};
-    setTimeout(()=>document.addEventListener('mousedown',h),0);
-    return()=>document.removeEventListener('mousedown',h);
-  },[]);
+  useClickOutside(ref,onClose);
 
   const applyDuration=mins=>{
     const end=addMinutes(startT,mins);
@@ -1531,7 +1481,7 @@ const WeekCalendar = ({projects,priorityIds,calCollapsed,onToggleCalendar,onAssi
   const cellMax=calHeight?Math.max(54,Math.floor(calHeight/weeks)-2):(weeks>1?118:188);
   // Standalone calendar events, sorted so a multi-day event keeps a stable row across days.
   const sortedCalEvents=[...calendarEvents].sort((a,b)=>a.startDate<b.startDate?-1:a.startDate>b.startDate?1:(a.id<b.id?-1:1));
-  const openTaskPicker=(e,t)=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setPickerPos({top:Math.min(r.bottom+4,window.innerHeight-400),left:Math.max(4,Math.min(r.left,window.innerWidth-300))});setPickerTask(t);};
+  const openTaskPicker=(e,t)=>{e.stopPropagation();setPickerPos(placePopover(e.currentTarget.getBoundingClientRect()));setPickerTask(t);};
 
   const allTasks=projects.flatMap(p=>
     p.tasks.filter(t=>!t.done&&t.dueDate)
@@ -1701,10 +1651,10 @@ const buildPrintHTML = (projects,priorityIds,completedExpanded) => {
   const normalGroups=projects.map(p=>({...p,masterTasks:p.tasks.filter(t=>!t.done&&!priorityIds.includes(t.id))})).filter(p=>p.masterTasks.length>0);
   const completedItems=completedExpanded?[...allTasks.filter(t=>t.done),...allReminders.filter(r=>r.done&&r.flagged)]:[];
   const css=`*{box-sizing:border-box;margin:0;padding:0}body{font-family:'DM Sans',sans-serif;color:#2A2825;padding:32pt;background:white}.hdr{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:24pt;border-bottom:1pt solid #E0D8D0;padding-bottom:10pt}h1{font-family:'DM Serif Display',serif;font-size:22pt}.date{font-size:9pt;color:#9A9088}.exit-btn,.print-btn{background:none;border:none;font-family:inherit;cursor:pointer;text-decoration:underline;padding:0}.exit-btn{font-size:11pt;color:#9A9088}.print-btn{display:block;margin-bottom:20pt;font-size:12pt;color:#2A2825;font-weight:600}.project{page-break-inside:avoid;margin-bottom:24pt;border:1pt solid #E0D8D0;border-radius:8pt;overflow:hidden}.ph{padding:10pt 14pt;font-family:'DM Serif Display',serif;font-size:13pt}.sec{padding:5pt 14pt 2pt;font-size:8pt;letter-spacing:1pt;text-transform:uppercase;color:#B0A898;font-weight:600;border-top:1pt solid #F0EBE5}.task{display:flex;align-items:center;gap:8pt;padding:5pt 14pt;font-size:10pt;border-top:1pt solid #F7F3EF}.dot{width:6pt;height:6pt;border-radius:50%;flex-shrink:0}.cb{width:10pt;height:10pt;border-radius:2pt;border:1.5pt solid #C8C0B8;flex-shrink:0}.cb.done{background:#2A2825;border-color:#2A2825}.done-text{text-decoration:line-through;color:#B0A898}.notes{display:flex;flex-wrap:wrap;gap:8pt;padding:10pt 14pt}.note{border-radius:4pt;padding:8pt 10pt;font-family:'Georgia','Times New Roman',serif;font-size:12pt;color:#3A3530;line-height:1.5;max-width:180pt}@media print{.exit-btn,.print-btn{display:none!important}}`;
-  const dot=c=>`<div class="dot" style="background:${c}"></div>`;
-  const masterSection=`<div class="project" style="page-break-after:always"><div class="ph" style="background:#F0EBE5">Master List</div>${priTasks.length?`<div class="sec" style="color:#D4758A;border-top:none">★ Priority</div>${priTasks.map(t=>`<div class="task"><div class="cb"></div>${dot(t.projectColor)}<span>${t.text}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${t.projectName}</span></div>`).join('')}` : ''}${flaggedReminders.length?`<div class="sec" style="color:#5B8FBF">⚑ Reminders</div>${flaggedReminders.map(r=>`<div class="task"><div class="cb"></div>${dot(r.projectColor)}<span>${r.text}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${r.projectName}</span></div>`).join('')}`:''}${normalGroups.map(p=>`<div class="sec">${p.name}</div>${p.masterTasks.map(t=>`<div class="task"><div class="cb"></div><span>${t.text}</span></div>`).join('')}`).join('')}${completedItems.length?`<div class="sec">Completed</div>${completedItems.map(i=>`<div class="task"><div class="cb done"></div>${dot(i.projectColor)}<span class="done-text">${i.text}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${i.projectName}</span></div>`).join('')}`:''}</div>`;
-  const projSections=projects.map(p=>`<div class="project"><div class="ph" style="background:${p.color};color:${isLight(p.color)?'#2A2825':'#fff'}">${p.name}</div>${p.tasks.length?`<div class="sec">Tasks</div>${p.tasks.map(t=>`<div class="task"><div class="cb${t.done?' done':''}"></div><span class="${t.done?'done-text':''}">${t.text}</span></div>`).join('')}`:''}${(p.reminders||[]).length?`<div class="sec">Reminders</div>${(p.reminders||[]).map(r=>`<div class="task"><div class="cb${r.done?' done':''}"></div><span class="${r.done?'done-text':''}">${r.text}</span>${r.flagged?` <span style="color:#5B8FBF">⚑</span>`:''}</div>`).join('')}`:''}${p.notes.length?`<div class="sec">Notes</div><div class="notes">${p.notes.map(n=>`<div class="note" style="background:${n.color}">${n.title?`<div style="font-family:'DM Serif Display',serif;font-size:13pt;margin-bottom:4pt">${n.title}</div>`:''}<div>${(n.text||'').replace(/\n/g,'<br/>')}</div>${(n.checklistItems||[]).map(it=>`<div style="margin-top:3pt;${it.done?'text-decoration:line-through;color:#9A9088':''}">• ${it.text}</div>`).join('')}</div>`).join('')}</div>`:''}  </div>`).join('');
-  return`<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Planner</title><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Serif+Display&family=Caveat:wght@400&display=swap" rel="stylesheet"/><style>${css}</style></head><body><div class="hdr"><div><h1>Planner</h1><div class="date">${new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div></div><button class="exit-btn" onclick="window.close()">← Exit print view</button></div><button class="print-btn" onclick="window.print()">Print / Save as PDF</button>${masterSection}${projSections}</body></html>`;
+  const dot=c=>`<div class="dot" style="background:${esc(c)}"></div>`;
+  const masterSection=`<div class="project" style="page-break-after:always"><div class="ph" style="background:#F0EBE5">Master List</div>${priTasks.length?`<div class="sec" style="color:#D4758A;border-top:none">★ Priority</div>${priTasks.map(t=>`<div class="task"><div class="cb"></div>${dot(t.projectColor)}<span>${esc(t.text)}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${esc(t.projectName)}</span></div>`).join('')}` : ''}${flaggedReminders.length?`<div class="sec" style="color:#5B8FBF">⚑ Reminders</div>${flaggedReminders.map(r=>`<div class="task"><div class="cb"></div>${dot(r.projectColor)}<span>${esc(r.text)}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${esc(r.projectName)}</span></div>`).join('')}`:''}${normalGroups.map(p=>`<div class="sec">${esc(p.name)}</div>${p.masterTasks.map(t=>`<div class="task"><div class="cb"></div><span>${esc(t.text)}</span></div>`).join('')}`).join('')}${completedItems.length?`<div class="sec">Completed</div>${completedItems.map(i=>`<div class="task"><div class="cb done"></div>${dot(i.projectColor)}<span class="done-text">${esc(i.text)}</span><span style="margin-left:auto;font-size:8pt;color:#9A9088">${esc(i.projectName)}</span></div>`).join('')}`:''}</div>`;
+  const projSections=projects.map(p=>`<div class="project"><div class="ph" style="background:${esc(p.color)};color:${isLight(p.color)?'#2A2825':'#fff'}">${esc(p.name)}</div>${p.tasks.length?`<div class="sec">Tasks</div>${p.tasks.map(t=>`<div class="task"><div class="cb${t.done?' done':''}"></div><span class="${t.done?'done-text':''}">${esc(t.text)}</span></div>`).join('')}`:''}${(p.reminders||[]).length?`<div class="sec">Reminders</div>${(p.reminders||[]).map(r=>`<div class="task"><div class="cb${r.done?' done':''}"></div><span class="${r.done?'done-text':''}">${esc(r.text)}</span>${r.flagged?` <span style="color:#5B8FBF">⚑</span>`:''}</div>`).join('')}`:''}${p.notes.length?`<div class="sec">Notes</div><div class="notes">${p.notes.map(n=>`<div class="note" style="background:${esc(n.color)}">${n.title?`<div style="font-family:'DM Serif Display',serif;font-size:13pt;margin-bottom:4pt">${esc(n.title)}</div>`:''}<div>${esc(n.text||'').replace(/\n/g,'<br/>')}</div>${(n.checklistItems||[]).map(it=>`<div style="margin-top:3pt;${it.done?'text-decoration:line-through;color:#9A9088':''}">• ${esc(it.text)}</div>`).join('')}</div>`).join('')}</div>`:''}  </div>`).join('');
+  return`<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Planner</title><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Serif+Display&display=swap" rel="stylesheet"/><style>${css}</style></head><body><div class="hdr"><div><h1>Planner</h1><div class="date">${new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div></div><button class="exit-btn" onclick="window.close()">← Exit print view</button></div><button class="print-btn" onclick="window.print()">Print / Save as PDF</button>${masterSection}${projSections}</body></html>`;
 };
 
 /* ── Copy for Copilot ──────────────────────────────────────────
@@ -1863,7 +1813,7 @@ async function decodeToMono(blob){
 const blobToB64=blob=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=rej;r.readAsDataURL(blob);});
 async function transcribeBlob(blob,name){
   const audio=await blobToB64(blob);
-  const res=await fetch('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio,mime:blob.type,name})});
+  const res=await fetch('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/json',...(await authHeader())},body:JSON.stringify({audio,mime:blob.type,name})});
   if(!res.ok){let msg='Transcription failed ('+res.status+').';try{const d=await res.json();if(d&&d.error)msg=d.error;}catch(_){}throw new Error(msg);}
   return (await res.json()).text||'';
 }
@@ -1956,7 +1906,8 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
     const raw=capture.trim(); if(!raw||busy)return;
     setNote(null);setBusy('Analyzing…');
     try{
-      const res=await fetch('/api/brainy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:raw})});
+      const res=await fetch('/api/brainy',{method:'POST',headers:{'Content-Type':'application/json',...(await authHeader())},body:JSON.stringify({text:raw})});
+      if(res.status===401)setNote('Brain AI needs a signed-in session — used the on-device extraction instead. Refresh the page and retry.');
       if(!res.ok)throw new Error('backend '+res.status);
       const data=await res.json();
       onCapture(resultToInsights(data));
@@ -2130,10 +2081,7 @@ const BrainySidebar = ({insights,projects,onAdd,onAddToNote,onDismiss,onCapture,
 const OverflowMenu = ({items}) => {
   const[open,setOpen]=useState(false);
   const ref=useRef(null);
-  useEffect(()=>{
-    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
-    document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h);
-  },[]);
+  useClickOutside(ref,()=>setOpen(false));
   return html`
     <div ref=${ref} style=${{position:'relative',flexShrink:0}}>
       <button onClick=${()=>setOpen(o=>!o)} title="More" aria-label="More options"
@@ -2320,13 +2268,13 @@ const App = () => {
   // Seed the app from a state blob (local cache or server), honoring the
   // persisted collapsed list.
   const bootState=saved=>{
-    const s=saved?purgeOldCompleted(saved):makeSeed();
+    const s=saved?purgeOldCompleted(normalizeState(saved)):makeSeed();
     setState(s);setExpandedIds(expandedFromState(s));
     setLoaded(true);
   };
   // A change pushed by ANOTHER device. Adopt it without echoing a save back up.
   const adoptRemote=(data,ts)=>{
-    const s=purgeOldCompleted(data);
+    const s=purgeOldCompleted(normalizeState(data));
     saveLocal(s,ts||new Date().toISOString());
     skipSave.current=true;
     setState(s);
@@ -2360,7 +2308,7 @@ const App = () => {
         chosen=makeSeed();chosenTs=reachable?new Date().toISOString():null;
         if(reachable){try{await withTimeout(pushRemote(userId,chosen,chosenTs),8000);}catch(e){}}
       }
-      const s=purgeOldCompleted(chosen);
+      const s=purgeOldCompleted(normalizeState(chosen));
       saveLocal(s,chosenTs);
       skipSave.current=true; // we already pushed during boot — don't re-push on first render
       setState(s);
@@ -2414,7 +2362,7 @@ const App = () => {
   useEffect(()=>{
     if(!loaded||!state)return;
     if(skipSave.current){skipSave.current=false;return;}
-    debouncedSave(state);
+    debouncedSave(state,ok=>setSyncStatus(ok?'synced':'connecting'));
   },[state,loaded]);
 
   const Loading=t=>html`<div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',color:'#B0A898',fontSize:14}}>${t}</div>`;
@@ -2442,7 +2390,35 @@ const App = () => {
   const setWeeks=n=>upState({weeksToShow:n});
   const upProjects=p=>upState({projects:p});
   const upProject=u=>upProjects(projects.map(p=>p.id===u.id?u:p));
-  const delProject=id=>{upProjects(projects.filter(p=>p.id!==id));setExpandedIds(prev=>{const n=new Set(prev);n.delete(id);return n;});};
+  /* Generic item CRUD — the single choke point every task/reminder/event
+     mutation goes through (project rows, master list, calendar, pickers). */
+  const patchItem=(pid,kind,id,patch,resort=false)=>setState(s=>({...s,projects:s.projects.map(p=>{
+    if(p.id!==pid)return p;
+    const key=KIND_KEY[kind];
+    let list=(p[key]||[]).map(it=>it.id===id?{...it,...(typeof patch==='function'?patch(it):patch)}:it);
+    if(resort)list=sortDoneLast(list);
+    return{...p,[key]:list};
+  })}));
+  const addItem=(pid,kind,item)=>setState(s=>({...s,projects:s.projects.map(p=>p.id===pid?{...p,[KIND_KEY[kind]]:[...(p[KIND_KEY[kind]]||[]),{id:uid(),done:false,...item}]}:p)}));
+  const removeItem=(pid,kind,id)=>setState(s=>({...s,projects:s.projects.map(p=>p.id===pid?{...p,[KIND_KEY[kind]]:(p[KIND_KEY[kind]]||[]).filter(i=>i.id!==id)}:p)}));
+  const findOwner=(kind,id)=>projects.find(p=>(p[KIND_KEY[kind]]||[]).some(i=>i.id===id));
+  /* One schedule writer for every entry point. For events, an explicit
+     endDate (including null) is honored; omitting it shifts an existing
+     span to keep its length (day-to-day calendar drags). */
+  const setSchedule=(pid,kind,id,day,time,end,endDate)=>patchItem(pid,kind,id,it=>{
+    if(kind!=='event')return{dueDate:day,taskTime:time,endTime:end};
+    const ne=endDate!==undefined?endDate
+      :(it.endDate&&it.dueDate&&day)
+        ?new Date(new Date(day).getTime()+(new Date(it.endDate).getTime()-new Date(it.dueDate).getTime())).toISOString().slice(0,10)
+        :null;
+    return{dueDate:day,taskTime:time,endTime:end,endDate:ne};
+  });
+  // Master-list toggle also un-archives (the Completed section lives there).
+  const masterToggle=(pid,kind,id)=>patchItem(pid,kind,id,it=>({...toggleDonePatch(it),archived:false}),true);
+  const delProject=id=>{
+    setState(s=>({...s,projects:s.projects.filter(p=>p.id!==id),collapsedIds:(s.collapsedIds||[]).filter(x=>x!==id)}));
+    setExpandedIds(prev=>{const n=new Set(prev);n.delete(id);return n;});
+  };
   const addProject=()=>{
     if(!newProjectName.trim())return;
     const color=PROJECT_COLORS[5+(projects.length%6)];
@@ -2466,21 +2442,9 @@ const App = () => {
     setExpandedIds(prev=>prev.has(id)?prev:new Set([...prev,id]));
     setState(s=>(s.collapsedIds||[]).includes(id)?{...s,collapsedIds:s.collapsedIds.filter(x=>x!==id)}:s);
   };
-  const masterToggleDone=(pid,tid)=>upProjects(projects.map(p=>{if(p.id!==pid)return p;const tasks=p.tasks.map(t=>t.id===tid?{...t,done:!t.done,archived:false,completedAt:!t.done?Date.now():null}:t);return{...p,tasks:[...tasks.filter(t=>!t.done),...tasks.filter(t=>t.done)]};}));
-  const masterToggleReminderDone=(pid,rid)=>upProjects(projects.map(p=>{if(p.id!==pid)return p;const reminders=(p.reminders||[]).map(r=>r.id===rid?{...r,done:!r.done,archived:false,completedAt:!r.done?Date.now():null}:r);return{...p,reminders:[...reminders.filter(r=>!r.done),...reminders.filter(r=>r.done)]};}));
-  const masterToggleEventDone=(pid,eid)=>upProjects(projects.map(p=>{if(p.id!==pid)return p;const events=(p.events||[]).map(e=>e.id===eid?{...e,done:!e.done,archived:false,completedAt:!e.done?Date.now():null}:e);return{...p,events:[...events.filter(e=>!e.done),...events.filter(e=>e.done)]};}));
   const togglePriority=tid=>{const a=priorityIds.includes(tid);upState({priorityIds:a?priorityIds.filter(x=>x!==tid):[...priorityIds,tid]});};
   const reorderPriority=(fromId,toId)=>{const a=[...priorityIds];const fi=a.indexOf(fromId),ti=a.indexOf(toId);if(fi!==-1&&ti!==-1){[a[fi],a[ti]]=[a[ti],a[fi]];upState({priorityIds:a});}};
   const emptyCompleted=()=>{setState(s=>{const projects=s.projects.map(p=>({...p,tasks:p.tasks.filter(t=>!t.archived),reminders:(p.reminders||[]).filter(r=>!r.archived),events:(p.events||[]).filter(e=>!e.archived)}));const liveIds=new Set(projects.flatMap(p=>p.tasks.map(t=>t.id)));return{...s,projects,priorityIds:s.priorityIds.filter(id=>liveIds.has(id))};});};
-  const assignDayToTask=(pid,tid,day,time,end)=>upProjects(projects.map(p=>p.id===pid?{...p,tasks:p.tasks.map(t=>t.id===tid?{...t,dueDate:day,taskTime:time,endTime:end}:t)}:p));
-  // Master-list assign: route to tasks OR reminders by which list the id belongs to.
-  const assignDayFromMaster=(pid,id,day,time,end)=>upProjects(projects.map(p=>{
-    if(p.id!==pid)return p;
-    if(p.tasks.some(t=>t.id===id))return{...p,tasks:p.tasks.map(t=>t.id===id?{...t,dueDate:day,taskTime:time,endTime:end}:t)};
-    if((p.reminders||[]).some(r=>r.id===id))return{...p,reminders:(p.reminders||[]).map(r=>r.id===id?{...r,dueDate:day,taskTime:time,endTime:end}:r)};
-    return p;
-  }));
-
   /* ── Brainy → Planner bridge ──────────────────────────────────
      This is the integration: a suggestion becomes a real planner
      item (tagged fromBrainy) and immediately flows everywhere the
@@ -2555,7 +2519,10 @@ const App = () => {
               ?{label:'🔑 Passkey on (this device)',onClick:()=>{}}
               :{label:'🔑 Set up a passkey',onClick:()=>{tryRegisterPasskey();}}]:[]),
           ]}/>
-          <input ref=${fileRef} type="file" accept=".json" style=${{display:'none'}} onChange=${e=>{const f=e.target.files?.[0];if(f)importBackup(f,s=>{setState(s);setExpandedIds(expandedFromState(s));});e.target.value='';}}/>
+          <input ref=${fileRef} type="file" accept=".json" style=${{display:'none'}} onChange=${e=>{const f=e.target.files?.[0];if(f)importBackup(f,raw=>{
+            if(!raw||!Array.isArray(raw.projects)){alert("That file doesn't look like a planner backup — nothing was imported.");return;}
+            const s=normalizeState(raw);setState(s);setExpandedIds(expandedFromState(s));
+          });e.target.value='';}}/>
           ${syncEnabled&&session&&html`<div style=${{display:'flex',alignItems:'center',gap:7,marginLeft:2}}>
             <span title=${syncStatus==='synced'?'Synced across devices':'Connecting…'} style=${{width:8,height:8,borderRadius:'50%',background:syncStatus==='synced'?'#5E9E5E':'#C9A227',flexShrink:0}}/>
             <${AddPasskeyButton}/>
@@ -2566,12 +2533,11 @@ const App = () => {
       </header>
       <div style=${{flex:1,display:'flex',overflow:'hidden',zoom}}>
         <${MasterPanel} projects=${projects} priorityIds=${priorityIds}
-          onToggleDone=${masterToggleDone} onTogglePriority=${togglePriority}
-          onToggleReminderDone=${masterToggleReminderDone} onToggleEventDone=${masterToggleEventDone}
+          onToggle=${masterToggle} onTogglePriority=${togglePriority}
           onReorderPriority=${reorderPriority} onEmptyCompleted=${emptyCompleted}
           completedExpanded=${completedExpanded}
           onToggleCompleted=${()=>upState({completedExpanded:!completedExpanded})}
-          onAssignDay=${assignDayFromMaster} weeks=${weeksToShow}
+          onAssignDay=${setSchedule} weeks=${weeksToShow}
           collapsed=${masterCollapsed} onToggleCollapse=${()=>setMasterCollapsed(p=>!p)} width=${masterWidth}/>
         ${!masterCollapsed&&html`<${PanelResizer} width=${masterWidth} setWidth=${setMasterWidth} dir=${1} min=${180} max=${560} zoom=${zoom}
           maxByWindow=${()=>window.innerWidth/zoom-(brainyCollapsed?30:brainWidth)-320}/>`}
@@ -2580,26 +2546,9 @@ const App = () => {
             calendarEvents=${calendarEvents} onSaveCalendarEvent=${saveCalendarEvent} onDeleteCalendarEvent=${deleteCalendarEvent}
             calCollapsed=${calCollapsed} onToggleCalendar=${()=>setCalCollapsed(p=>!p)}
             calHeight=${calHeight} onSetCalHeight=${setCalHeight} zoom=${zoom}
-            onAssignDay=${(tid,day,time,end,kind,endDate)=>{
-              if(kind==='event'){
-                const proj=projects.find(p=>(p.events||[]).some(e=>e.id===tid));
-                if(proj)upProjects(projects.map(p=>p.id===proj.id?{...p,events:(p.events||[]).map(e=>{
-                  if(e.id!==tid)return e;
-                  // Picker passes an explicit last day (or null to clear); a
-                  // day-to-day drag omits it — shift the span to keep its length.
-                  const ne=endDate!==undefined?endDate
-                    :(e.endDate&&e.dueDate&&day)
-                      ?new Date(new Date(day).getTime()+(new Date(e.endDate).getTime()-new Date(e.dueDate).getTime())).toISOString().slice(0,10)
-                      :null;
-                  return{...e,dueDate:day,taskTime:time,endTime:end,endDate:ne};
-                })}:p));
-              } else if(kind==='reminder'){
-                const proj=projects.find(p=>(p.reminders||[]).some(r=>r.id===tid));
-                if(proj)upProjects(projects.map(p=>p.id===proj.id?{...p,reminders:(p.reminders||[]).map(r=>r.id===tid?{...r,dueDate:day,taskTime:time,endTime:end}:r)}:p));
-              } else {
-                const proj=projects.find(p=>p.tasks.some(t=>t.id===tid));
-                if(proj)assignDayToTask(proj.id,tid,day,time,end);
-              }
+            onAssignDay=${(id,day,time,end,kind,endDate)=>{
+              const proj=findOwner(kind||'task',id);
+              if(proj)setSchedule(proj.id,kind||'task',id,day,time,end,endDate);
             }}/>
           <div style=${{flex:1,overflowY:'auto',overflowX:'hidden',padding:'16px 20px 40px'}}>
           ${addingProject&&html`<div style=${{background:'white',borderRadius:14,padding:'11px 15px',display:'flex',gap:10,alignItems:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.07)',border:'1.5px solid #2A2825',marginBottom:12}}>
@@ -2609,7 +2558,7 @@ const App = () => {
           </div>`}
           ${projects.length===0&&!addingProject&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#B0A898',fontSize:13}}><div style=${{fontSize:26,marginBottom:12,opacity:0.4}}>▤</div>No projects yet — add one above.</div>`}
           <${DraggableProjects} projects=${projects} onReorder=${upProjects}
-            renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow} onMoveNote=${moveNote} onCopyCopilot=${()=>copyTextToClipboard(buildCopilotText(state,[p.id]))}/>`}/>
+            renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow} onMoveNote=${moveNote} onCopyCopilot=${()=>copyTextToClipboard(buildCopilotText(state,[p.id]))} onPatchItem=${patchItem} onAddItem=${addItem} onRemoveItem=${removeItem} onSetSchedule=${setSchedule}/>`}/>
           </div>
         </div>
         ${!brainyCollapsed&&html`<${PanelResizer} width=${brainWidth} setWidth=${setBrainWidth} dir=${-1} min=${240} max=${600} zoom=${zoom}

@@ -4,6 +4,25 @@
 
 const CLAUDE_MODEL = 'claude-haiku-4-5'; // matches the original Brainy; bump to claude-sonnet-4-6 / claude-opus-4-8 for higher quality
 
+// Only signed-in users may spend API credits. The client sends its Supabase
+// session JWT; GoTrue validates it. These two values are public by design
+// (they ship in index.html) — env vars only override them if the Supabase
+// project ever moves. Keep this block in sync with transcribe.mjs.
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://qykyltsgxfechhfnxrbq.supabase.co';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF5a3lsdHNneGZlY2hoZm54cmJxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEyMTk0MDgsImV4cCI6MjA5Njc5NTQwOH0.7sI2e-oTjMaz2Ca8E4hUlfvUX5E8G_xceGgkp7neM80';
+const MAX_TEXT_LENGTH = 100_000;
+
+async function requireUser(req) {
+  const auth = req.headers.get('authorization') || '';
+  if (!auth.startsWith('Bearer ')) return false;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: { apikey: SUPABASE_ANON_KEY, authorization: auth },
+    });
+    return r.ok;
+  } catch { return false; }
+}
+
 const SYSTEM_PROMPT = `You are the processing engine inside Brainy, a personal AI note taker used by a healthcare field sales professional. They sell and support hemodynamic monitoring products from Edwards Lifesciences and Becton Dickinson (BD), and spend their days in hospitals working with physicians, KOLs, and clinical staff.
 
 You receive raw text: either a transcribed voice note or a pasted meeting recap (often a Microsoft Teams Copilot recap). Extract structured information from it.
@@ -57,6 +76,7 @@ const RESULT_SCHEMA = {
 
 export default async (req) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+  if (!(await requireUser(req))) return Response.json({ error: 'Sign in to use the AI features.' }, { status: 401 });
 
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return Response.json({ error: 'Server is missing ANTHROPIC_API_KEY.' }, { status: 500 });
@@ -64,6 +84,7 @@ export default async (req) => {
   let text;
   try { ({ text } = await req.json()); } catch { return Response.json({ error: 'Invalid JSON body.' }, { status: 400 }); }
   if (!text || !text.trim()) return Response.json({ error: 'Empty text.' }, { status: 400 });
+  if (text.length > MAX_TEXT_LENGTH) return Response.json({ error: 'Text too long — split it into smaller notes.' }, { status: 413 });
 
   let r;
   try {
