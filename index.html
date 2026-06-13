@@ -394,10 +394,10 @@ const NoteColorPicker = ({projectColor,currentColor,gradientStep,onSelect,onClos
       <div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',marginBottom:8,fontWeight:600}}>Standard</div>
       <div style=${{display:'flex',gap:7,flexWrap:'wrap',marginBottom:12}}>
         ${STANDARD_COLORS.map(c=>html`<div key=${c} onClick=${()=>onSelect(c,null)} style=${{width:24,height:24,borderRadius:'50%',background:c,cursor:'pointer',flexShrink:0,border:currentColor===c&&gradientStep===null?'2.5px solid #2A2825':'1.5px solid rgba(0,0,0,0.12)'}}/>`)}</div>
-      <div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',marginBottom:8,fontWeight:600}}>Project Tones</div>
+      <div style=${{fontSize:10,letterSpacing:'0.8px',textTransform:'uppercase',color:'#B0A898',marginBottom:8,fontWeight:600}}>Section Tones</div>
       <div style=${{display:'flex',gap:7,marginBottom:12}}>
         ${grad.map((c,i)=>html`<div key=${i} onClick=${()=>onSelect(c,i)} style=${{width:24,height:24,borderRadius:'50%',background:c,cursor:'pointer',flexShrink:0,border:gradientStep===i?'2.5px solid #2A2825':'1.5px solid rgba(0,0,0,0.12)'}}/>`)}</div>
-      <div onClick=${()=>onSelect(projectColor,null)} style=${{fontSize:12,color:'#9A9088',cursor:'pointer',textDecoration:'underline',textUnderlineOffset:3}}>Reset to project color</div>
+      <div onClick=${()=>onSelect(projectColor,null)} style=${{fontSize:12,color:'#9A9088',cursor:'pointer',textDecoration:'underline',textUnderlineOffset:3}}>Reset to section color</div>
     </div>`;
 };
 
@@ -444,7 +444,7 @@ const ThreeDotMenu = ({onDelete,onCopyCopilot}) => {
           title="Copy this plan's open tasks — paste into a Microsoft Copilot chat"
           style=${{width:'100%',padding:'11px 16px',background:'none',border:'none',cursor:'pointer',textAlign:'left',fontSize:13,color:copyState==='err'?'#A0291E':copyState==='done'?'#5E7A5E':'#2A2825',borderRadius:10,borderBottom:'1px solid #F0EBE5',whiteSpace:'nowrap'}}>
           ${copyState==='done'?'✓ Copied — paste into Copilot':copyState==='err'?'Copy failed':'⧉ Copy for Copilot'}</button>`}
-        <button onClick=${()=>{setOpen(false);onDelete();}} style=${{width:'100%',padding:'11px 16px',background:'none',border:'none',cursor:'pointer',textAlign:'left',fontSize:13,color:'#A0291E',borderRadius:10}}>Delete project</button>
+        <button onClick=${()=>{setOpen(false);onDelete();}} style=${{width:'100%',padding:'11px 16px',background:'none',border:'none',cursor:'pointer',textAlign:'left',fontSize:13,color:'#A0291E',borderRadius:10}}>Delete section</button>
       </div>`}
     </div>`;
 };
@@ -989,7 +989,7 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
               </div>
             </div>
             ${project.notes.length===0
-              ?html`<div style=${{color:'#C0B8B0',fontSize:12,fontStyle:'italic',lineHeight:1.6}}>Add sticky notes for this project.<br/><span style=${{fontSize:11}}>Tap color circle to recolor. Tap ⤢ to expand. Drag handle above note to reorder.</span></div>`
+              ?html`<div style=${{color:'#C0B8B0',fontSize:12,fontStyle:'italic',lineHeight:1.6}}>Add sticky notes for this section.<br/><span style=${{fontSize:11}}>Tap color circle to recolor. Tap ⤢ to expand. Drag handle above note to reorder.</span></div>`
               :visibleNotes.length===0
               ?html`<div style=${{color:'#C0B8B0',fontSize:12,fontStyle:'italic',lineHeight:1.6}}>All ${hiddenCount} note${hiddenCount>1?'s are':' is'} hidden — tap “Show ${hiddenCount} hidden” above.</div>`
               :html`<${DraggableNotes} notes=${visibleNotes} onReorder=${reorderVisibleNotes} projectId=${project.id} onMoveNote=${(note,toId)=>onMoveNote&&onMoveNote(note,project.id,toId)} noteWidth=${leftCollapsed?(masterCollapsed?380:320):(masterCollapsed?280:220)}
@@ -1215,7 +1215,7 @@ const MasterPanel = ({projects,priorityIds,onToggle,onTogglePriority,onAssignDay
           ${completedExpanded&&completedItems.map(item=>html`<${MasterItem} key=${item.id} item=${item} onToggle=${onToggle} onTogglePriority=${onTogglePriority} onAssignDay=${onAssignDay} priorityIds=${priorityIds} weeks=${weeks}/>`)}
         </div>`}
       </div>
-      ${confirmEmpty&&html`<${ConfirmDialog} message="This will permanently delete all completed tasks and reminders from all projects." confirmLabel="Empty" onConfirm=${()=>{setConfirmEmpty(false);onEmptyCompleted();}} onCancel=${()=>setConfirmEmpty(false)}/>`}
+      ${confirmEmpty&&html`<${ConfirmDialog} message="This will permanently delete all completed tasks and reminders from all sections." confirmLabel="Empty" onConfirm=${()=>{setConfirmEmpty(false);onEmptyCompleted();}} onCancel=${()=>setConfirmEmpty(false)}/>`}
     </div>`;
 };
 
@@ -2611,9 +2611,9 @@ const App = () => {
             <span onClick=${()=>setZoom(1)} title="Reset to 100%" style=${{fontSize:11,color:'#7A7068',minWidth:36,textAlign:'center',cursor:'pointer',userSelect:'none'}}>${Math.round(zoom*100)}%</span>
             <button onClick=${()=>stepZoom(0.1)} title="Zoom in" style=${{background:'none',border:'none',color:'#7A7068',fontSize:15,lineHeight:1,cursor:'pointer',padding:'4px 9px'}}>+</button>
           </div>
-          <button onClick=${()=>setAddingProject(true)} style=${{background:'#2A2825',color:'#F4F1ED',border:'none',borderRadius:16,padding:'6px 14px',fontSize:12,fontWeight:500,cursor:'pointer'}}>+ Project</button>
+          <button onClick=${()=>setAddingProject(true)} style=${{background:'#2A2825',color:'#F4F1ED',border:'none',borderRadius:16,padding:'6px 14px',fontSize:12,fontWeight:500,cursor:'pointer'}}>+ Section</button>
           ${pendingAllCount>0&&html`<button onClick=${completeAll}
-            title="Archive all completed items across every project to Master Completed"
+            title="Archive all completed items across every section to Master Completed"
             style=${{display:'flex',alignItems:'center',gap:5,background:'none',color:'#5E7A5E',border:'1px solid #BBD0BB',borderRadius:16,padding:'6px 12px',fontSize:12,fontWeight:500,cursor:'pointer'}}>
             <svg width="11" height="9" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6L8 1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Complete all (${pendingAllCount})
@@ -2664,11 +2664,11 @@ const App = () => {
             }}/>
           <div style=${{flex:1,overflowY:'auto',overflowX:'hidden',padding:'16px 20px 40px'}}>
           ${addingProject&&html`<div style=${{background:'white',borderRadius:14,padding:'11px 15px',display:'flex',gap:10,alignItems:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.07)',border:'1.5px solid #2A2825',marginBottom:12}}>
-            <input autoFocus value=${newProjectName} onInput=${e=>setNewProjectName(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addProject();if(e.key==='Escape'){setAddingProject(false);setNewProjectName('');}}} placeholder="Project name…" style=${{flex:1,border:'none',outline:'none',fontSize:14,background:'none',color:'#2A2825'}}/>
+            <input autoFocus value=${newProjectName} onInput=${e=>setNewProjectName(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addProject();if(e.key==='Escape'){setAddingProject(false);setNewProjectName('');}}} placeholder="Section name…" style=${{flex:1,border:'none',outline:'none',fontSize:14,background:'none',color:'#2A2825'}}/>
             <button onClick=${addProject} style=${{background:'#2A2825',color:'white',border:'none',borderRadius:7,padding:'5px 12px',fontSize:12,cursor:'pointer'}}>Add</button>
             <button onClick=${()=>{setAddingProject(false);setNewProjectName('');}} style=${{background:'none',border:'none',color:'#9A9088',fontSize:18,lineHeight:1,cursor:'pointer'}}>×</button>
           </div>`}
-          ${projects.length===0&&!addingProject&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#B0A898',fontSize:13}}><div style=${{fontSize:26,marginBottom:12,opacity:0.4}}>▤</div>No projects yet — add one above.</div>`}
+          ${projects.length===0&&!addingProject&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#B0A898',fontSize:13}}><div style=${{fontSize:26,marginBottom:12,opacity:0.4}}>▤</div>No sections yet — add one above.</div>`}
           <${DraggableProjects} projects=${projects} onReorder=${upProjects}
             renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow} onMoveNote=${moveNote} onCopyCopilot=${()=>copyTextToClipboard(buildCopilotText(state,[p.id]))} onPatchItem=${patchItem} onAddItem=${addItem} onRemoveItem=${removeItem} onSetSchedule=${setSchedule}/>`}/>
           </div>
