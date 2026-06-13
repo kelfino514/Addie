@@ -35,6 +35,11 @@ const html = htm.bind(h);
 /* ── Utilities ─────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2,10);
 const debounce = (fn,ms) => { let t; return (...a) => { clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; };
+/* Character caps on user-typed fields, applied as input maxlength so they cap
+   typing AND paste. Guards against an accidental giant paste bloating the
+   synced blob and breaking layout (RLS already blocks strangers from writing).
+   The Brainy capture box is intentionally uncapped. */
+const LIMIT={ name:120, item:280, note:5000 };
 // Lowercased word tokens, for fuzzy matching insight text to a project.
 const STOPWORDS=new Set(['the','and','for','with','from','this','that','your','about','into','need','make','sure','will','have','has','out','off','get','got','set','use','via','per','due','any','all','new','one','two','was','are','not','but','can','our','their','them','then','than','also','before','after','next','some']);
 const tokenize=s=>(s||'').toLowerCase().match(/[a-z0-9]+/g)||[];
@@ -468,9 +473,9 @@ const NoteModal = ({note,onUpdate,onClose}) => {
         </div>
         <div style=${{flex:1,overflow:'auto'}}>
           <div style=${{padding:'16px 20px'}}>
-            <input value=${title} onInput=${e=>{setTitle(e.target.value);commit(e.target.value,text,items);}} placeholder="Note title…"
+            <input value=${title} onInput=${e=>{setTitle(e.target.value);commit(e.target.value,text,items);}} placeholder="Note title…" maxlength=${LIMIT.name}
               style=${{width:'100%',background:'transparent',border:'none',outline:'none',fontFamily:"'DM Serif Display',serif",fontSize:20,color:'#2A2825',marginBottom:10,borderBottom:'1px solid rgba(0,0,0,0.1)',paddingBottom:6,display:'block'}}/>
-            <textarea value=${text} onInput=${e=>{setText(e.target.value);commit(title,e.target.value,items);}} placeholder="Write here…"
+            <textarea value=${text} onInput=${e=>{setText(e.target.value);commit(title,e.target.value,items);}} placeholder="Write here…" maxlength=${LIMIT.note}
               style=${{width:'100%',minHeight:140,background:'transparent',border:'none',outline:'none',resize:'none',fontFamily:"'Georgia','Times New Roman',serif",fontSize:20,color:'#3A3530',lineHeight:1.6,display:'block'}}/>
             ${items.length>0&&html`<div style=${{marginTop:10,borderTop:'1px solid rgba(0,0,0,0.08)',paddingTop:10}}>
               <div style=${{fontSize:11,letterSpacing:'0.7px',textTransform:'uppercase',color:'rgba(0,0,0,0.35)',marginBottom:8,fontWeight:600}}>Checklist</div>
@@ -484,7 +489,7 @@ const NoteModal = ({note,onUpdate,onClose}) => {
             </div>`}
             <div style=${{display:'flex',alignItems:'center',gap:10,marginTop:12,borderTop:'1px solid rgba(0,0,0,0.08)',paddingTop:10}}>
               <div style=${{width:18,height:18,borderRadius:4,border:`1.5px dashed ${ck}`,flexShrink:0}}/>
-              <input value=${newItem} onInput=${e=>setNewItem(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addItem();}} placeholder="Add checklist item…"
+              <input value=${newItem} onInput=${e=>setNewItem(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addItem();}} placeholder="Add checklist item…" maxlength=${LIMIT.item}
                 style=${{flex:1,background:'transparent',border:'none',outline:'none',fontFamily:"'Georgia','Times New Roman',serif",fontSize:19,color:'#3A3530'}}/>
               ${newItem&&html`<button onClick=${addItem} style=${{background:'rgba(0,0,0,0.12)',border:'none',borderRadius:6,padding:'4px 10px',fontSize:12,cursor:'pointer',color:'#2A2825'}}>Add</button>`}
             </div>
@@ -708,6 +713,28 @@ const StickyNote = ({note,onUpdate,onDelete,projectColor,noteWidth=220}) => {
     setTimeout(()=>{ta.focus();ta.setSelectionRange(newCursor,newCursor);autoH(ta);},0);
   };
 
+  // List convention: Enter on a bullet line starts a new bullet; Enter on an
+  // empty bullet drops it and breaks out of the list (like Notes/Notion/Docs).
+  const bulletKey=e=>{
+    if(e.key!=='Enter'||e.shiftKey)return;
+    const ta=e.target,start=ta.selectionStart,end=ta.selectionEnd,val=ta.value;
+    if(start!==end)return;
+    const lineStart=val.lastIndexOf('\n',start-1)+1;
+    let lineEnd=val.indexOf('\n',start);if(lineEnd<0)lineEnd=val.length;
+    const m=val.slice(lineStart,start).match(/^(\s*)•[ \t]?/);
+    if(!m)return; // not inside a bullet — let Enter do its normal thing
+    e.preventDefault();
+    let newVal,newCursor;
+    if(val.slice(lineStart,lineEnd).slice(m[0].length).trim()===''){
+      newVal=val.slice(0,lineStart)+val.slice(lineEnd);newCursor=lineStart; // empty bullet → exit list
+    }else{
+      const ins='\n'+m[1]+'• ';
+      newVal=val.slice(0,start)+ins+val.slice(start);newCursor=start+ins.length;
+    }
+    onUpdate({...note,text:newVal});
+    setTimeout(()=>{ta.focus();ta.setSelectionRange(newCursor,newCursor);autoH(ta);},0);
+  };
+
   // Auto-grow the body up to a max, then scroll inside the note.
   const autoH=el=>{if(!el)return;el.style.height='auto';const h=el.scrollHeight,max=280;el.style.height=Math.min(h,max)+'px';el.style.overflowY=h>max?'auto':'hidden';};
   // Re-fit whenever the text changes externally (e.g. a Brain item appended) or on expand/resize.
@@ -736,8 +763,9 @@ const StickyNote = ({note,onUpdate,onDelete,projectColor,noteWidth=220}) => {
               boxShadow:'inset 0 0 0 1px rgba(255,255,255,0.5)'}} title="Change color"/>
           <!-- Bullet -->
           <button onClick=${insertBullet}
-            style=${{background:'none',border:'none',color:'rgba(0,0,0,0.38)',fontSize:16,
-              cursor:'pointer',lineHeight:1,padding:'4px 6px',fontWeight:700}} title="Insert bullet">•</button>
+            style=${{background:'none',border:'none',color:'rgba(0,0,0,0.45)',
+              cursor:'pointer',lineHeight:0,padding:'4px 6px',display:'flex',alignItems:'center'}} title="Bullet list">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="2.6" cy="4" r="1.3" fill="currentColor"/><circle cx="2.6" cy="8" r="1.3" fill="currentColor"/><circle cx="2.6" cy="12" r="1.3" fill="currentColor"/><path d="M6 4h8M6 8h8M6 12h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
           <!-- Expand -->
           <button onClick=${e=>{e.stopPropagation();setShowModal(true);}}
             style=${{background:'none',border:'none',color:'rgba(0,0,0,0.35)',fontSize:15,
@@ -757,9 +785,9 @@ const StickyNote = ({note,onUpdate,onDelete,projectColor,noteWidth=220}) => {
           </div>
         </div>`}
         ${!collapsed&&html`<div style=${{padding:'8px 10px 10px'}}>
-          <input value=${note.title||''} onInput=${e=>onUpdate({...note,title:e.target.value})} onClick=${e=>e.stopPropagation()} placeholder="Title…"
+          <input value=${note.title||''} onInput=${e=>onUpdate({...note,title:e.target.value})} onClick=${e=>e.stopPropagation()} placeholder="Title…" maxlength=${LIMIT.name}
             style=${{width:'100%',background:'transparent',border:'none',outline:'none',fontFamily:"'DM Serif Display',serif",fontSize:14,color:'#2A2825',marginBottom:5,borderBottom:'1px solid rgba(0,0,0,0.08)',paddingBottom:4,display:'block'}}/>
-          <textarea value=${note.text||''} onInput=${handleText} onClick=${e=>e.stopPropagation()} placeholder="Note…"
+          <textarea value=${note.text||''} onInput=${handleText} onKeyDown=${bulletKey} onClick=${e=>e.stopPropagation()} placeholder="Note…" maxlength=${LIMIT.note}
             style=${{width:'100%',background:'transparent',border:'none',outline:'none',resize:'none',fontFamily:"'Georgia','Times New Roman',serif",fontSize:12,color:'#3A3530',lineHeight:1.5,display:'block',minHeight:40,overflow:'hidden'}}
             ref=${el=>{taRef.current=el;}}/>
           ${(note.checklistItems||[]).length>0&&html`<div style=${{marginTop:5,borderTop:'1px solid rgba(0,0,0,0.06)',paddingTop:5}}>
@@ -814,7 +842,7 @@ const ItemRow = ({item,kind='task',highlighted=false,onToggleDone,onToggleHighli
       style=${{display:'flex',alignItems:'center',gap:8,padding:'8px 14px',borderRadius:8,
         background:highlighted?hl.bg:hov?'rgba(0,0,0,0.025)':'transparent',transition:'background 0.12s',userSelect:'none'}}>
       <${Checkbox} checked=${item.done} color=${accentColor} onClick=${()=>onToggleDone(item.id)}/>
-      ${editing?html`<input ref=${inputRef} value=${draft} onInput=${e=>setDraft(e.target.value)} onBlur=${commitEdit} onKeyDown=${e=>{if(e.key==='Enter')commitEdit();if(e.key==='Escape'){setEditing(false);setDraft(item.text);}}} style=${{flex:1,border:'none',outline:'none',background:'rgba(0,0,0,0.04)',borderRadius:4,padding:'2px 6px',fontSize:13.5,color:'#2A2825'}}/>`
+      ${editing?html`<input ref=${inputRef} value=${draft} onInput=${e=>setDraft(e.target.value)} onBlur=${commitEdit} maxlength=${LIMIT.item} onKeyDown=${e=>{if(e.key==='Enter')commitEdit();if(e.key==='Escape'){setEditing(false);setDraft(item.text);}}} style=${{flex:1,border:'none',outline:'none',background:'rgba(0,0,0,0.04)',borderRadius:4,padding:'2px 6px',fontSize:13.5,color:'#2A2825'}}/>`
         :html`<span style=${{flex:1,fontSize:13.5,textDecoration:item.done?'line-through':'none',color:item.done?'#B0A898':'#2A2825',lineHeight:1.3,cursor:'text'}} onDblClick=${e=>{e.stopPropagation();setEditing(true);setDraft(item.text);}}>
             ${item.text}
             ${kind==='event'&&item.taskTime&&html`<span style=${{fontSize:11,color:'#9A9088',marginLeft:4}}>
@@ -920,9 +948,9 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
             <div onClick=${()=>setOpenColorPickerId(isColorOpen?null:project.id)} style=${{width:16,height:16,borderRadius:'50%',background:project.color,cursor:'pointer',border:isLight(project.color)?'2px solid rgba(0,0,0,0.2)':'2px solid rgba(255,255,255,0.4)',boxShadow:'inset 0 0 0 2px rgba(255,255,255,0.3)',flexShrink:0}} title="Change color"/>
             ${isColorOpen&&html`<${ProjectColorPicker} current=${project.color} onSelect=${c=>{handleColorChange(c);setOpenColorPickerId(null);}} onClose=${()=>setOpenColorPickerId(null)}/>`}
           </div>
-          <div style=${{flex:1,minWidth:0}} onClick=${e=>e.stopPropagation()}>
-            ${editingName?html`<input ref=${nameInputRef} value=${nameDraft} onInput=${e=>setNameDraft(e.target.value)} onBlur=${commitName} onKeyDown=${e=>{if(e.key==='Enter')commitName();if(e.key==='Escape'){setEditingName(false);setNameDraft(project.name);}}} style=${{fontFamily:"'DM Serif Display',serif",fontSize:16,fontWeight:400,color:textColor,background:'rgba(255,255,255,0.25)',border:'none',outline:'none',borderRadius:4,padding:'1px 6px',width:'100%'}}/>`
-              :html`<span style=${{fontFamily:"'DM Serif Display',serif",fontSize:16,fontWeight:400,color:textColor,display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',cursor:'text'}} onDblClick=${e=>{e.stopPropagation();setEditingName(true);setNameDraft(project.name);}} title="Double-tap to rename">${project.name}</span>`}
+          <div style=${{flex:1,minWidth:0}}>
+            ${editingName?html`<input ref=${nameInputRef} value=${nameDraft} onInput=${e=>setNameDraft(e.target.value)} onBlur=${commitName} onClick=${e=>e.stopPropagation()} maxlength=${LIMIT.name} onKeyDown=${e=>{if(e.key==='Enter')commitName();if(e.key==='Escape'){setEditingName(false);setNameDraft(project.name);}}} style=${{fontFamily:"'DM Serif Display',serif",fontSize:16,fontWeight:400,color:textColor,background:'rgba(255,255,255,0.25)',border:'none',outline:'none',borderRadius:4,padding:'1px 6px',width:'100%'}}/>`
+              :html`<span style=${{fontFamily:"'DM Serif Display',serif",fontSize:16,fontWeight:400,color:textColor,display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',cursor:'pointer'}} onDblClick=${e=>{e.stopPropagation();setEditingName(true);setNameDraft(project.name);}} title="Tap to expand · double-tap to rename">${project.name}</span>`}
           </div>
           ${pendingComplete.length>0&&html`<button onClick=${e=>{e.stopPropagation();sweepCompleted();}}
             title="Move completed tasks, reminders & events to Master Completed"
@@ -931,7 +959,7 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
             Complete ${pendingComplete.length}
           </button>`}
           <div onClick=${e=>e.stopPropagation()}><${ThreeDotMenu} onDelete=${()=>setConfirm(true)} onCopyCopilot=${onCopyCopilot}/></div>
-          <span style=${{fontSize:11,color:subColor,transform:isExpanded?'rotate(180deg)':'none',transition:'transform 0.2s',display:'inline-block',flexShrink:0,marginLeft:2}}>▾</span>
+          <span style=${{fontSize:17,color:isLight(project.color)?'rgba(0,0,0,0.55)':'rgba(255,255,255,0.8)',transform:isExpanded?'rotate(180deg)':'none',transition:'transform 0.2s',display:'inline-block',flexShrink:0,marginLeft:2,lineHeight:1}} title=${isExpanded?'Collapse':'Expand'}>▾</span>
         </div>
         ${isExpanded&&html`<div style=${{display:'flex',borderRadius:'0 0 14px 14px',overflow:'visible'}}>
 
@@ -957,7 +985,7 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
                 </div>
                 <div style=${{display:'flex',alignItems:'center',gap:8,padding:'4px 14px 10px',borderTop:'1px solid #F7F3EF',marginTop:2}}>
                   <div style=${{width:15,height:15,borderRadius:3,border:'1.5px dashed #C8C0B8',flexShrink:0}}/>
-                  <input value=${newTask} onInput=${e=>setNewTask(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addTask();}} placeholder="Add a task…  @6126 = due" style=${{flex:1,minWidth:0,background:'none',border:'none',outline:'none',fontSize:13,color:'#2A2825'}}/>
+                  <input value=${newTask} onInput=${e=>setNewTask(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addTask();}} placeholder="Add a task…  @6126 = due" maxlength=${LIMIT.item} style=${{flex:1,minWidth:0,background:'none',border:'none',outline:'none',fontSize:13,color:'#2A2825'}}/>
                   ${extractDue(newTask).due&&html`<span title="Due ${isoToLong(extractDue(newTask).due)}" style=${{flexShrink:0,fontSize:11,fontWeight:600,color:'#5B8FBF',whiteSpace:'nowrap'}}>${isoToShort(extractDue(newTask).due)}</span>`}
                   ${newTask&&html`<button onClick=${addTask} style=${{background:'#2A2825',color:'white',border:'none',borderRadius:5,padding:'3px 9px',fontSize:11,cursor:'pointer'}}>Add</button>`}
                 </div>
@@ -971,7 +999,7 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
                 </div>
                 <div style=${{display:'flex',alignItems:'center',gap:8,padding:'4px 14px 14px',borderTop:'1px solid #F7F3EF',marginTop:2}}>
                   <div style=${{width:15,height:15,borderRadius:3,border:'1.5px dashed #C8C0B8',flexShrink:0}}/>
-                  <input value=${newReminder} onInput=${e=>setNewReminder(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addReminder();}} placeholder="Add a reminder…  @date" style=${{flex:1,minWidth:0,background:'none',border:'none',outline:'none',fontSize:13,color:'#2A2825'}}/>
+                  <input value=${newReminder} onInput=${e=>setNewReminder(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addReminder();}} placeholder="Add a reminder…  @date" maxlength=${LIMIT.item} style=${{flex:1,minWidth:0,background:'none',border:'none',outline:'none',fontSize:13,color:'#2A2825'}}/>
                   ${extractDue(newReminder).due&&html`<span title="Due ${isoToLong(extractDue(newReminder).due)}" style=${{flexShrink:0,fontSize:11,fontWeight:600,color:'#5B8FBF',whiteSpace:'nowrap'}}>${isoToShort(extractDue(newReminder).due)}</span>`}
                   ${newReminder&&html`<button onClick=${addReminder} style=${{background:'#2A2825',color:'white',border:'none',borderRadius:5,padding:'3px 9px',fontSize:11,cursor:'pointer'}}>Add</button>`}
                 </div>
@@ -1024,7 +1052,7 @@ const ProjectStrip = ({project,onUpdate,onDelete,isExpanded,onToggle,priorityIds
                   <div style=${{width:15,height:15,borderRadius:3,border:'1.5px dashed #C8C0B8',flexShrink:0}}/>
                   <input value=${newEvent} onInput=${e=>setNewEvent(e.target.value)}
                     onKeyDown=${e=>{if(e.key==='Enter'){addEvent(newEvent);setNewEvent('');}}}
-                    placeholder="Add an event…  @date"
+                    placeholder="Add an event…  @date" maxlength=${LIMIT.item}
                     style=${{flex:1,minWidth:0,background:'none',border:'none',outline:'none',fontSize:13,color:'#2A2825'}}/>
                   ${extractDue(newEvent).due&&html`<span title="Due ${isoToLong(extractDue(newEvent).due)}" style=${{flexShrink:0,fontSize:11,fontWeight:600,color:'#5B8FBF',whiteSpace:'nowrap'}}>${isoToShort(extractDue(newEvent).due)}</span>`}
                   ${newEvent&&html`<button onClick=${()=>{addEvent(newEvent);setNewEvent('');}}
@@ -1512,7 +1540,7 @@ const CalEventForm = ({event,onSave,onDelete,onClose}) => {
     <div style=${{position:'fixed',inset:0,zIndex:3000,background:'rgba(42,40,37,0.45)',display:'flex',alignItems:'center',justifyContent:'center'}} onClick=${onClose}>
       <div onClick=${e=>e.stopPropagation()} style=${{background:'white',borderRadius:14,padding:'20px 22px',width:'min(360px,92vw)',boxShadow:'0 16px 48px rgba(0,0,0,0.2)'}}>
         <div style=${{fontFamily:"'DM Serif Display',serif",fontSize:18,marginBottom:14}}>${event?'Edit calendar event':'New calendar event'}</div>
-        <input autoFocus value=${name} onInput=${e=>setName(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')submit();}} placeholder="Event name…" style=${{...inp,marginBottom:12}}/>
+        <input autoFocus value=${name} onInput=${e=>setName(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')submit();}} placeholder="Event name…" maxlength=${LIMIT.name} style=${{...inp,marginBottom:12}}/>
         <div style=${{display:'flex',gap:10,marginBottom:14}}>
           <label style=${{flex:1,fontSize:11,color:'#7A7068',fontWeight:600}}>Start<input type="date" value=${start} onInput=${e=>{setStart(e.target.value);if(end<e.target.value)setEnd(e.target.value);}} style=${{...inp,marginTop:4}}/></label>
           <label style=${{flex:1,fontSize:11,color:'#7A7068',fontWeight:600}}>End<input type="date" value=${end} min=${start} onInput=${e=>setEnd(e.target.value)} style=${{...inp,marginTop:4}}/></label>
@@ -1839,7 +1867,7 @@ const InsightCard = ({insight,projects,selectedProjectId,onSelectProject,importa
           <div style=${{display:'flex',alignItems:'center',gap:5,marginBottom:4}}>
             <span style=${{fontSize:13,fontWeight:700,color:'#7A7068',flexShrink:0}}>＋</span>
             <input value=${noteName} onInput=${e=>setNoteName(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addNewNote();}}
-              placeholder="Name the note (optional)" autofocus
+              placeholder="Name the note (optional)" autofocus maxlength=${LIMIT.name}
               style=${{flex:1,minWidth:0,border:'1px solid #E0D8D0',borderRadius:6,padding:'5px 7px',fontSize:11.5,color:'#2A2825',background:'white',outline:'none'}}/>
             <button onClick=${addNewNote} title="Create a new note"
               style=${{flexShrink:0,border:'none',background:'#2A2825',color:'#F4F1ED',borderRadius:6,padding:'5px 9px',fontSize:11,fontWeight:500,cursor:'pointer'}}>Create</button>
@@ -2664,13 +2692,14 @@ const App = () => {
             }}/>
           <div style=${{flex:1,overflowY:'auto',overflowX:'hidden',padding:'16px 20px 40px'}}>
           ${addingProject&&html`<div style=${{background:'white',borderRadius:14,padding:'11px 15px',display:'flex',gap:10,alignItems:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.07)',border:'1.5px solid #2A2825',marginBottom:12}}>
-            <input autoFocus value=${newProjectName} onInput=${e=>setNewProjectName(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addProject();if(e.key==='Escape'){setAddingProject(false);setNewProjectName('');}}} placeholder="Section name…" style=${{flex:1,border:'none',outline:'none',fontSize:14,background:'none',color:'#2A2825'}}/>
+            <input autoFocus value=${newProjectName} onInput=${e=>setNewProjectName(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addProject();if(e.key==='Escape'){setAddingProject(false);setNewProjectName('');}}} placeholder="Section name…" maxlength=${LIMIT.name} style=${{flex:1,border:'none',outline:'none',fontSize:14,background:'none',color:'#2A2825'}}/>
             <button onClick=${addProject} style=${{background:'#2A2825',color:'white',border:'none',borderRadius:7,padding:'5px 12px',fontSize:12,cursor:'pointer'}}>Add</button>
             <button onClick=${()=>{setAddingProject(false);setNewProjectName('');}} style=${{background:'none',border:'none',color:'#9A9088',fontSize:18,lineHeight:1,cursor:'pointer'}}>×</button>
           </div>`}
-          ${projects.length===0&&!addingProject&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#B0A898',fontSize:13}}><div style=${{fontSize:26,marginBottom:12,opacity:0.4}}>▤</div>No sections yet — add one above.</div>`}
+          ${projects.length===0&&!addingProject&&html`<div onClick=${()=>setAddingProject(true)} style=${{textAlign:'center',padding:'52px 20px',color:'#B0A898',fontSize:13,cursor:'pointer',userSelect:'none'}}><div style=${{fontSize:30,marginBottom:10,opacity:0.5,lineHeight:1}}>＋</div>No sections yet — tap to add one.</div>`}
           <${DraggableProjects} projects=${projects} onReorder=${upProjects}
             renderProject=${(p)=>html`<${ProjectStrip} project=${p} onUpdate=${upProject} onDelete=${delProject} isExpanded=${expandedIds.has(p.id)} onToggle=${()=>toggleExp(p.id)} priorityIds=${priorityIds} onTogglePriority=${togglePriority} masterCollapsed=${masterCollapsed} openColorPickerId=${openColorPickerId} setOpenColorPickerId=${setOpenColorPickerId} weeks=${weeksToShow} onMoveNote=${moveNote} onCopyCopilot=${()=>copyTextToClipboard(buildCopilotText(state,[p.id]))} onPatchItem=${patchItem} onAddItem=${addItem} onRemoveItem=${removeItem} onSetSchedule=${setSchedule}/>`}/>
+          ${!addingProject&&projects.length>0&&html`<div onClick=${()=>setAddingProject(true)} title="Add a new section" style=${{display:'flex',alignItems:'center',justifyContent:'center',gap:7,marginTop:12,padding:'12px',borderRadius:14,border:'1.5px dashed #D5CDC4',background:'rgba(255,255,255,0.45)',color:'#9A9088',fontSize:13,fontWeight:500,cursor:'pointer',userSelect:'none'}}><span style=${{fontSize:18,lineHeight:1}}>＋</span>New section</div>`}
           </div>
         </div>
         ${!brainyCollapsed&&html`<${PanelResizer} width=${brainWidth} setWidth=${setBrainWidth} dir=${-1} min=${240} max=${600} zoom=${zoom}
